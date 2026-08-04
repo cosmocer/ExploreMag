@@ -1946,16 +1946,16 @@ class SuperMAGDownloadViewer:
     # ----- UI construction -------------------------------------------------
 
     def _make_variables(self) -> None:
-        self.logon_var = tk.StringVar(value="cercer")
+        self.logon_var = tk.StringVar(value="")
         self.metadata_file_var = tk.StringVar(value="")
-        self.start_date_var = tk.StringVar(value="2024-05-12")
-        self.start_time_var = tk.StringVar(value="03:00")
-        self.end_date_var = tk.StringVar(value="2024-05-12")
-        self.end_time_var = tk.StringVar(value="06:00")
-        self.lat_min_var = tk.StringVar(value="25")
-        self.lat_max_var = tk.StringVar(value="85")
-        self.lon_west_var = tk.StringVar(value="-170")
-        self.lon_east_var = tk.StringVar(value="40")
+        self.start_date_var = tk.StringVar(value="")
+        self.start_time_var = tk.StringVar(value="")
+        self.end_date_var = tk.StringVar(value="")
+        self.end_time_var = tk.StringVar(value="")
+        self.lat_min_var = tk.StringVar(value="")
+        self.lat_max_var = tk.StringVar(value="")
+        self.lon_west_var = tk.StringVar(value="")
+        self.lon_east_var = tk.StringVar(value="")
         self.output_file_var = tk.StringVar(value=self._default_output_filename())
         self.high_resolution_var = tk.BooleanVar(value=False)
 
@@ -2570,11 +2570,11 @@ class SuperMAGDownloadViewer:
     # ----- dialogs and validation ------------------------------------------
 
     def _default_output_filename(self) -> str:
-        start_date = self.start_date_var.get() if hasattr(self, "start_date_var") else "2024-05-12"
-        start_time = self.start_time_var.get().replace(":", "") if hasattr(self, "start_time_var") else "0300"
-        end_date = self.end_date_var.get() if hasattr(self, "end_date_var") else start_date
-        end_time = self.end_time_var.get().replace(":", "") if hasattr(self, "end_time_var") else "0600"
-        filename = f"{start_date}_{start_time}_{end_date}_{end_time}_supermag_nez.nc"
+        start_date = self.start_date_var.get() 
+        start_time = self.start_time_var.get().replace(":", "") 
+        end_date = self.end_date_var.get() 
+        end_time = self.end_time_var.get().replace(":", "")
+        filename = f"{start_date}_{start_time}_{end_date}_{end_time}.nc"
         return str(Path.cwd() / filename)
 
     def choose_metadata_file(self) -> None:
