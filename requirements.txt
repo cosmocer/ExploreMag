@@ -1,0 +1,21 @@
+# Core numerical, data, plotting, signal-processing, and NetCDF support
+numpy
+pandas
+matplotlib
+scipy
+netCDF4
+
+# Geographic maps, interactive plot labels, and IGRF field directions
+cartopy
+mplcursors
+ppigrf
+
+# GMAG is not published on PyPI. Install its official Git repository in
+# editable mode so its non-Python Stations catalogue remains available.
+-e git+https://github.com/kylermurphy/gmag.git@master#egg=gmag
+cdflib>=1.0.4
+requests
+wget
+
+# Tkinter is also required by ExploreMag, but it is supplied by Python or the
+# operating system (for example: sudo apt install python3-tk), not by pip.
