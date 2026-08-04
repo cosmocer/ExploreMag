@@ -122,14 +122,26 @@ In cases that only a few stations play a key role and their data are central to 
 *** Include appropriate reference (see list below)
 *** For details please see https://supermag.jhuapl.edu/products/?tab=description.
 
-===================When using INTERMAGNET Data===================
+### Using CARISMA data
 
-*** Include appropriate acknowledgement (see www.intermagnet.org/data-donnee/data-eng.php#conditions).
+- Include the acknowledgement required by the
+  [CARISMA rules of the road](https://carisma.ca/carisma-data/data-use-requirements).
+  
+### Using IMAGE data
 
-===================When using THEMIS Data========================
+- Include the acknowledgement required by the
+  [IMAGE rules of the road](https://space.fmi.fi/image/www/index.php?page=rules_of_road).
 
-*** Include appropriate acknowledgement (see https://themis.igpp.ucla.edu/roadrules.shtml).
+### Using INTERMAGNET data
 
+- Include the acknowledgement required by the
+  [INTERMAGNET conditions of use](https://www.intermagnet.org/data-donnee/data-eng.php#conditions).
+
+### Using THEMIS data
+
+- Include the acknowledgement required by the
+  [THEMIS rules of the road](https://themis.igpp.ucla.edu/roadrules.shtml).
+ 
 ===========================References============================
 
 gmag Python package

@@ -740,6 +740,8 @@ publications or presentations.
 
 - [Using magnetometer data](#using-magnetometer-data)
 - [Using substorm lists](#using-substorm-lists)
+- [Using CARISMA data](#using-carisma-data)
+- [Using IMAGE data](#using-image-data)
 - [Using INTERMAGNET data](#using-intermagnet-data)
 - [Using THEMIS data](#using-themis-data)
 - [Core references](#core-references)
@@ -749,7 +751,7 @@ publications or presentations.
 
 ### Using magnetometer data
 
-#### Requirements for all uses
+#### Requirements for all uses of SuperMAG
 
 - Include the acknowledgement listed on the SuperMAG website.
 - Cite the appropriate technical papers for the stations used. See
@@ -806,7 +808,7 @@ scientific conclusions:
 Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T.,
 Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source Python package
 for ground-based magnetometers. *Frontiers in Astronomy and Space Sciences*,
-9, 1005061.
+9, 1005061, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
 
 #### SuperMAG
 
@@ -816,12 +818,16 @@ Gjerloev, J. W. (2012), The SuperMAG data processing technique,
 
 ### Collaborator references for SuperMag
 
+#### AUTUMNX
+
+Connors, M., Schofield, I., Reiter, K., Chi, P. J., Rowe, K. M., & Russell, C. T. (2016). The AUTUMNX magnetometer meridian chain in Québec, Canada. *Earth, Planets and Space*, 68(1), 2, [doi:10.1186/s40623-015-0354-4](https://doi.org/10.1186/s40623-015-0354-4).
+
 #### EMMA
 
 Lichtenberger, J., M. Clilverd, B. Heilig, M. Vellante, J. Manninen,
 C. Rodger, A. Collier, A. Jørgensen, J. Reda, R. Holzworth, and R. Friedel
 (2013), The plasmasphere during a space weather event: First results from the
-PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23.
+PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23, [doi:10.1051/swsc/2013045](http://dx.doi.org/10.1051/swsc/2013045).
 
 #### IMAGE Chain
 
@@ -851,7 +857,7 @@ of the plasmasphere by Mid-continent MAgnetoseismic Chain magnetometers,
 
 Yumoto, K., and the CPMN Group (2001), Characteristics of Pi 2 magnetic
 pulsations observed at the CPMN stations: A review of the STEP results,
-*Earth, Planets and Space*, 53, 981–992.
+*Earth, Planets and Space*, 53, 981–992, [doi:10.1186/BF03351695](https://doi.org/10.1186/BF03351695).
 
 #### CARISMA
 
@@ -891,8 +897,7 @@ Response of the Auroral Electrojet Indices to Abrupt Southward IMF Turnings,
 
 Newell, P. T., and J. W. Gjerloev (2014), Local geomagnetic indices and the
 prediction of auroral power, *Journal of Geophysical Research: Space Physics*,
-119,
-[doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
+119, [doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
 
 #### SMR and SMR-LT
 
@@ -935,7 +940,7 @@ If you use ExploreMag to download data from SuperMag, please cite the SuperMag s
 
 If ExploreMag is used for downloading higher cadence data from THEMIS, CARISMA, and IMAGE chains, please also cite the gmag Python package that makes the download possible:
 
-Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T., Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source python package for ground-based magnetometers. Frontiers in Astronomy and Space Sciences, 9, 1005061.
+Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T., Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source python package for ground-based magnetometers. Frontiers in Astronomy and Space Sciences, 9, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
 
 The following sources support the terminology and analysis conventions described above. They do not imply that ExploreMag reproduces every method or statistical assumption in each paper.
 
