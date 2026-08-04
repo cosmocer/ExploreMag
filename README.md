@@ -777,6 +777,16 @@ scientific conclusions:
   [Substorm-list references](#substorm-list-references).
 - Consult the [SuperMAG products description](https://supermag.jhuapl.edu/products/?tab=description)
   for details.
+  
+### Using CARISMA data
+
+- Include the acknowledgement required by the
+  [CARISMA rules of the road](https://carisma.ca/carisma-data/data-use-requirements).
+  
+### Using IMAGE data
+
+- Include the acknowledgement required by the
+  [IMAGE rules of the road](https://space.fmi.fi/image/www/index.php?page=rules_of_road).
 
 ### Using INTERMAGNET data
 
@@ -787,6 +797,7 @@ scientific conclusions:
 
 - Include the acknowledgement required by the
   [THEMIS rules of the road](https://themis.igpp.ucla.edu/roadrules.shtml).
+  
 
 ### Core references
 
