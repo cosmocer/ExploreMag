@@ -125,6 +125,9 @@ The interface is easiest to understand as four connected areas.
 - All entered times are UTC. Analysis dialogs use
   `YYYY-MM-DD HH:mm:SS`; download entries may display date and time separately.
 - **NEZ** means local magnetic north, local magnetic east, and vertical down.
+- **NEZ2GEO** is available for map vectors and rotates the loaded NEZ
+  horizontal components into geographic north/east using the IGRF field
+  direction at each station and map timestamp.
 - **GEO** means geographic north, geographic east, and vertical down, when the
   loaded file contains GEO components.
 - `dBh = sqrt(dBn² + dBe²)` is the nonnegative horizontal magnitude derived
@@ -422,6 +425,19 @@ rotated dH/dt. A 90° clockwise rotated horizontal perturbation is often used
 as a qualitative proxy for equivalent ionospheric-current direction, but the
 relationship depends on ionospheric and Earth conductivity and must not be
 treated as a direct current measurement.
+
+The vector-coordinate selector provides three ways to orient arrows on the
+geographic map:
+
+- **NEZ** plots the loaded local magnetic north/east components directly.
+- **NEZ2GEO** rotates the loaded NEZ components into geographic north/east at
+  each station and timestamp using IGRF-14. This option requires `ppigrf` but
+  does not require a GEO variable in the loaded file.
+- **GEO** plots the file's geographic north/east components directly and is
+  available only when the loaded file contains GEO data.
+
+The selected coordinate option applies to all four vector quantities and does
+not affect the scalar map layer when scalar and vector maps are overlaid.
 
 - When start equals end, ExploreMag opens one interactive map.
 - When start precedes end, it creates a sequence at **Plot cadence (s)**.
