@@ -2150,9 +2150,16 @@ def cadence_time_grid(
     cadence_seconds: float,
 ) -> pd.DatetimeIndex:
     cadence = snap_cadence_seconds(cadence_seconds)
+    grid_start = parse_utc(start)
+    grid_end = parse_utc(end)
+    if np.isclose(cadence, 60.0, rtol=0.0, atol=1.0e-9):
+        # The minute product is always labelled on exact UTC minute marks,
+        # even when the requested interval includes non-zero seconds.
+        grid_start = grid_start.ceil("1min")
+        grid_end = grid_end.floor("1min")
     return pd.date_range(
-        start=parse_utc(start),
-        end=parse_utc(end),
+        start=grid_start,
+        end=grid_end,
         freq=pd.to_timedelta(cadence, unit="s"),
     )
 
@@ -2507,6 +2514,19 @@ def bandpass_pi2(
     return output
 
 
+def pi2_band_resolvable(
+    sampling_hz: float,
+    min_period_seconds: float,
+    max_period_seconds: float,
+) -> bool:
+    """Return whether a sampled series can represent the full Pi2 band."""
+    if sampling_hz <= 0 or min_period_seconds <= 0 or max_period_seconds <= min_period_seconds:
+        return False
+    low_hz = 1.0 / max_period_seconds
+    high_hz = 1.0 / min_period_seconds
+    return bool(0.0 < low_hz < high_hz < 0.5 * sampling_hz)
+
+
 def _resolved_native_cadence(
     frame: pd.DataFrame,
     meta: Any,
@@ -2601,6 +2621,8 @@ def prepare_station(
         output_cadence_seconds = 1.0
     elif cadence_mode == "10s":
         output_cadence_seconds = 10.0
+    elif cadence_mode == "1min":
+        output_cadence_seconds = 60.0
     elif cadence_mode == "2hz":
         output_cadence_seconds = 0.5
     else:
@@ -2721,13 +2743,28 @@ def prepare_station(
             f"{coverage:.1%}, below required {min_coverage:.1%}"
         )
 
-    filtered_full = bandpass_pi2(
-        output_filter,
-        sampling_hz=1.0 / output_cadence_seconds,
-        min_period_seconds=pi2_min_period_seconds,
-        max_period_seconds=pi2_max_period_seconds,
-        order=filter_order,
-    )
+    output_sampling_hz = 1.0 / output_cadence_seconds
+    filtered_full = np.full_like(output_filter, np.nan, dtype=float)
+    if pi2_band_resolvable(
+        output_sampling_hz,
+        pi2_min_period_seconds,
+        pi2_max_period_seconds,
+    ):
+        try:
+            filtered_full = bandpass_pi2(
+                output_filter,
+                sampling_hz=output_sampling_hz,
+                min_period_seconds=pi2_min_period_seconds,
+                max_period_seconds=pi2_max_period_seconds,
+                order=filter_order,
+            )
+        except Exception:
+            # Pi2 is an optional derived product. A filtering problem must not
+            # reject otherwise valid 10-second (or other cadence) magnetic data
+            # or prevent its NetCDF file from being written.
+            pass
+    # An unresolved band (including 1-minute output) also remains NaN. This is
+    # a derived-product limitation, not a download or station-data failure.
     target_positions = filter_time.get_indexer(target_time)
     pi2 = filtered_full[target_positions, :]
 
@@ -2928,6 +2965,11 @@ def _write_data_variables(
     pi2.minimum_period_seconds = float(pi2_min_period_seconds)
     pi2.maximum_period_seconds = float(pi2_max_period_seconds)
     pi2.filter = f"Butterworth band-pass, order {filter_order}, zero phase"
+    if not np.isfinite(pi2_nez).any():
+        pi2.note = (
+            "Unavailable when the output cadence cannot resolve the complete "
+            "requested period band, or when finite runs are too short for filtering"
+        )
     geo.long_name = "unavailable geographic-coordinate vector"
     geo.note = "Stored as NaN to retain the existing viewer-compatible schema"
     quality_var.long_name = "data quality flag"
@@ -3098,6 +3140,15 @@ def write_netcdf(
             f"{filter_order}th-order zero-phase Butterworth band-pass for periods "
             f"{pi2_min_period_seconds:g}--{pi2_max_period_seconds:g} s."
         )
+        if not pi2_band_resolvable(
+            1.0 / float(stations[0].output_cadence_seconds),
+            pi2_min_period_seconds,
+            pi2_max_period_seconds,
+        ):
+            ds.pi2_processing += (
+                " The selected output cadence cannot resolve the complete requested "
+                "Pi2 band, so pi2_nez is stored as NaN without rejecting station data."
+            )
         ds.history = (
             f"Created {datetime.now(timezone.utc).isoformat()} by "
             "gmag_download_and_clean.py"
@@ -3344,7 +3395,7 @@ def validate_netcdf(path: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Download GMAG stations, choose native/10-second/1-second/2-Hz output, "
+            "Download GMAG stations, choose native/1-minute/10-second/1-second/2-Hz output, "
             "optionally derive magnetic perturbations, and write NetCDF4."
         )
     )
@@ -3363,10 +3414,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="End of the optional quiet-reference interval.",
     )
     parser.add_argument(
-        "--cadence-mode", choices=("original", "10s", "1s", "2hz"), default=None,
+        "--cadence-mode", choices=("original", "1min", "10s", "1s", "2hz"), default=None,
         help=(
             "Output cadence: original=nested per-station time dimensions, "
-            "10s=common 10-second grid, 1s=common 1-second grid, "
+            "1min=common exact-UTC-minute grid, 10s=common 10-second grid, "
+            "1s=common 1-second grid, "
             "2hz=common 0.5-second grid. When omitted "
             "in an interactive terminal, the program asks."
         ),
@@ -3374,7 +3426,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-cadence-seconds", type=float, default=None,
         help=(
-            "Deprecated compatibility option. Use 10, 1, or 0.5 for the "
+            "Deprecated compatibility option. Use 60, 10, 1, or 0.5 for the "
             "corresponding common cadence mode."
         ),
     )
@@ -3509,9 +3561,11 @@ def resolve_modes(args) -> tuple[str, str, str]:
             legacy_mode = "1s"
         elif np.isclose(legacy, 10.0, atol=1.0e-12):
             legacy_mode = "10s"
+        elif np.isclose(legacy, 60.0, atol=1.0e-12):
+            legacy_mode = "1min"
         else:
             raise ValueError(
-                "--output-cadence-seconds now accepts only 0.5, 1.0, or 10.0; use "
+                "--output-cadence-seconds now accepts only 0.5, 1.0, 10.0, or 60.0; use "
                 "--cadence-mode original for native station cadence"
             )
         if cadence_mode is not None and cadence_mode != legacy_mode:
@@ -3525,10 +3579,11 @@ def resolve_modes(args) -> tuple[str, str, str]:
                 {
                     "a": "original|original cadence for each station (nested NetCDF4 groups)",
                     "b": "10s|common IMAGE-compatible 10-second cadence",
-                    "c": "1s|common 1-second cadence",
-                    "d": "2hz|common THEMIS GMAG cadence, 0.5 seconds (2 Hz)",
+                    "c": "1min|common exact-UTC-minute cadence",
+                    "d": "1s|common 1-second cadence",
+                    "e": "2hz|common THEMIS GMAG cadence, 0.5 seconds (2 Hz)",
                 },
-                "d",
+                "e",
             )
             cadence_mode = value
         else:
@@ -3736,6 +3791,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Baseline method: {baseline_method}")
     if cadence_mode == "original":
         print("NetCDF layout:   nested /stations/<code> groups with station-specific time")
+    elif cadence_mode == "1min":
+        print("Output grid:     60 s; all timestamps are exact UTC minute marks")
     elif cadence_mode == "1s":
         print("Output grid:     1 s (1 Hz); native 2-Hz data are aligned to 1-s timestamps")
     elif cadence_mode == "10s":
@@ -3984,7 +4041,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if cadence_mode == "original":
         print(
             "Native-cadence data are under /stations/<code>; viewers requiring "
-            "one root-level time dimension must use --cadence-mode 10s, 1s, or 2hz."
+            "one root-level time dimension must use --cadence-mode 1min, 10s, 1s, or 2hz."
         )
     return 0
 

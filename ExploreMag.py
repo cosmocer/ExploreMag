@@ -963,9 +963,10 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
         source_frame.grid(row=0, column=2, columnspan=6, sticky="w", padx=(0, 8))
         for text, value in (
             ("SuperMAG 1-minute", "supermag-1min"),
-            ("gmag 1-second", "gmag-1s"),
             ("gmag 2 Hz", "gmag-2hz"),
+            ("gmag 1-second", "gmag-1s"),
             ("gmag 10-second", "gmag-10s"),
+            ("gmag 1-minute", "gmag-1min"),
             ("native cadence", "gmag-native"),
         ):
             viewer.ttk.Radiobutton(
@@ -1136,6 +1137,7 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
             "gmag-1s": "1s",
             "gmag-2hz": "2hz",
             "gmag-10s": "10s",
+            "gmag-1min": "1min",
             "gmag-native": "original",
         }.get(source)
         if cadence_mode is None:
@@ -1153,11 +1155,11 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
             "--output", str(output_path),
             "--yes",
         ]
-        if cadence_mode in {"10s", "original"}:
-            # IMAGE's native product is commonly 10-second data. Faster common
-            # modes retain the stricter cadence guard, while these two modes
-            # must accept IMAGE without fabricating higher-rate measurements.
-            argv.extend(["--max-native-cadence-seconds", "10.1"])
+        if cadence_mode in {"10s", "1min", "original"}:
+            # Slower common modes accept stations measured at their requested
+            # cadence without fabricating higher-rate measurements.
+            maximum_native_cadence = "60.1" if cadence_mode == "1min" else "10.1"
+            argv.extend(["--max-native-cadence-seconds", maximum_native_cadence])
         if baseline[0]:
             argv.extend(["--quiet-start", baseline[0], "--quiet-end", baseline[1]])
         else:
@@ -3569,9 +3571,28 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             )
             return
 
+        existing_station_indices = {
+            int(panel["station_index"])
+            for panel in self.manual_stack_panels
+            if panel.get("station_index") is not None
+        }
+        newly_selected = [
+            station_index
+            for station_index in selected
+            if station_index not in existing_station_indices
+        ]
+        if not newly_selected:
+            self.manual_stack_status_var.set(
+                "Manual stack unchanged: all selected stations are already plotted."
+            )
+            if self.manual_stack_window is not None and self.manual_stack_window.winfo_exists():
+                self.manual_stack_window.deiconify()
+                self.manual_stack_window.lift()
+            return
+
         if not self.manual_stack_panels:
             self._sync_manual_time_range_to_main()
-        for station_index in selected:
+        for station_index in newly_selected:
             self.manual_stack_panels.append(
                 {
                     "station_index": station_index,

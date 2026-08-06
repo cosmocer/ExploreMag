@@ -146,7 +146,7 @@ magnetospheric event for the first time.
 2. **Choose cadence before download.** Use 2 Hz or 1-second data when Pc2,
    short-period Pi1, detailed phase, or polarization is important. Ten-second
    data can resolve nominal Pi2 periods but cannot resolve the 5–10 s Pc2 band.
-   One-minute SuperMAG data cannot resolve a 40–150 s Pi2 band.
+   One-minute SuperMAG or GMAG data cannot resolve a 40–150 s Pi2 band.
 3. **Download or open the file.** Confirm the loaded filename, station count,
    time range, and map coverage. Read the GMAG station report when available.
 4. **Inspect raw components first.** Select one station near the event region,
@@ -187,9 +187,10 @@ button.
 | ExploreMag option | Data source and download method | Output |
 | --- | --- | --- |
 | **SuperMAG 1-minute** | Uses the **SuperMAG web-services API** directly: `inventory.php` identifies stations and `data-api.php` downloads NEZ/GEO vectors. A valid SuperMAG logon is required. It does not use GMAG. | SuperMAG one-minute station data on the returned timestamps. |
-| **gmag 1-second** | Uses **GMAG**, not the SuperMAG API. GMAG station loaders obtain THEMIS-hosted ground-magnetometer data, CARISMA data, and MagStar data. IMAGE stations prefer high-resolution THEMIS-hosted files and fall back to `gmag.arrays.image` when necessary. | All accepted stations on one common 1-second grid. |
 | **gmag 2 Hz** | Uses the same **GMAG** sources and fallbacks described above; it does not call the SuperMAG data API. | All accepted stations on one common 0.5-second grid (2 Hz). |
+| **gmag 1-second** | Uses **GMAG**, not the SuperMAG API. GMAG station loaders obtain THEMIS-hosted ground-magnetometer data, CARISMA data, and MagStar data. IMAGE stations prefer high-resolution THEMIS-hosted files and fall back to `gmag.arrays.image` when necessary. | All accepted stations on one common 1-second grid. |
 | **gmag 10-second** | Uses the same **GMAG** sources and fallbacks; it does not call the SuperMAG data API. IMAGE native 10-second measurements are accepted, and every accepted station is placed on the common IMAGE-compatible 10-second grid. | All accepted stations on one common 10-second grid. |
+| **gmag 1-minute** | Uses the same **GMAG** sources and fallbacks; it does not call the SuperMAG data API. Native faster data are averaged into one-minute bins, and native one-minute stations are accepted. | All accepted stations in a rectangular ExploreMag-compatible NetCDF file on exact UTC minute marks. |
 | **native cadence** | Uses **GMAG**, not the SuperMAG API, and preserves each station's original cadence. | A NetCDF4 file with station-specific `/stations/<code>/time` and magnetic variables. ExploreMag can open this grouped layout. |
 | **Custom SuperMAG** button | Opens a local SuperMAG custom block/vector NetCDF file, detects its cadence, aligns nominal sample times, and converts it to the suite's rectangular station/time/component format. Interior gaps shorter than five seconds are filled; longer gaps remain missing. | The converted file is saved beside the source as `<source-name>_converted_for_exploremag.nc`, then opened automatically. |
 
@@ -235,14 +236,33 @@ flags.
   allowed by the configured short-gap duration. A gap exceeding that duration
   remains NaN and is not silently bridged.
 
+### GMAG 1-minute
+
+- The shared output timestamps are spaced by 60 seconds and always fall on
+  exact UTC minute marks (seconds and microseconds are zero).
+- Native higher-rate measurements are averaged into populated one-minute bins;
+  native one-minute measurements are retained on the common grid.
+- The rectangular result is written as a NetCDF file that ExploreMag opens
+  through the same pathway as the other common-cadence GMAG products.
+
 NetCDF `data_quality` values distinguish the result: `0` is observed/aligned,
 `1` is interpolated or repaired, and `2` is missing.
 
+Pi2 generation is an optional derived step and never controls whether valid
+GMAG magnetic data are accepted or saved. This applies to every GMAG cadence,
+including 10-second and 1-minute products. If the requested Pi2 band is not
+resolvable at the output cadence, the finite record is too short, or the
+filter otherwise cannot be applied, ExploreMag still writes the cleaned
+`nez`, `raw_nez`, quality flags, station metadata, and time coordinates. The
+affected `pi2_nez` values are stored as `NaN` with an explanatory NetCDF note.
+In particular, one-minute output cannot represent the complete nominal
+40–150-second Pi2 band because its Nyquist period is 120 seconds.
+
 ## Cleaning and correction
 
-The GMAG 2 Hz, 1-second, 10-second, and native-cadence paths apply vector-aware
-quality control. Custom SuperMAG conversion and direct SuperMAG downloads also
-apply the suite's cleaning before saving.
+The GMAG 2 Hz, 1-second, 10-second, 1-minute, and native-cadence paths apply
+vector-aware quality control. Custom SuperMAG conversion and direct SuperMAG
+downloads also apply the suite's cleaning before saving.
 
 The processing sequence is:
 
@@ -263,7 +283,7 @@ missing and are visible through the quality flags and coverage metadata.
 
 ## GMAG baselining options
 
-The GMAG **2 Hz**, **1-second**, and **10-second** download options produce
+The GMAG **2 Hz**, **1-second**, **10-second**, and **1-minute** download options produce
 magnetic perturbations using one of two baselining choices. ExploreMag asks for
 the choice when a GMAG download starts.
 
@@ -377,9 +397,16 @@ differentiation enhances high-frequency noise.
 
 ### Manual station stack
 
-The manual stack is independent of the plot-mode radio buttons. Select a
-station, click **Add selected station to stack →**, and repeat in the desired
-order. The manual interval can be changed after panels are added. It supports
+The manual stack is independent of the plot-mode radio buttons. Select one or
+more stations from the map or the latitude/longitude lists, then click **Add
+selected station(s) to the stack →**. ExploreMag compares the selection with
+the panels already present and appends only newly selected stations. Selecting
+an existing station again does not duplicate or replace its plot; when every
+selected station is already present, the stack remains unchanged. This makes
+map and list selections incremental while preserving the existing panel order,
+axis settings, and point annotations.
+
+The manual interval can be changed after panels are added. The window supports
 component or dBh display, common or independent y scaling, point marking,
 annotation lists, removal of selections, text export, and PNG output.
 
@@ -715,7 +742,11 @@ file that includes GEO components.
 
 Inspect the station report for source-loader, cadence, component, coverage, or
 baseline errors. IMAGE 10-second data are accepted by the 10-second and native
-GUI modes, while faster common modes retain stricter native-cadence checks.
+GUI modes, and native one-minute data are accepted by the GMAG 1-minute mode,
+while faster common modes retain stricter native-cadence checks. An unavailable
+or failed Pi2 calculation is not a station-rejection condition and does not
+prevent the GMAG NetCDF from being saved; inspect `pi2_nez` and its metadata
+separately from the cleaned magnetic variables.
 
 ## ExploreMag Rules of the Road
 
@@ -740,8 +771,6 @@ publications or presentations.
 
 - [Using magnetometer data](#using-magnetometer-data)
 - [Using substorm lists](#using-substorm-lists)
-- [Using CARISMA data](#using-carisma-data)
-- [Using IMAGE data](#using-image-data)
 - [Using INTERMAGNET data](#using-intermagnet-data)
 - [Using THEMIS data](#using-themis-data)
 - [Core references](#core-references)
@@ -751,7 +780,7 @@ publications or presentations.
 
 ### Using magnetometer data
 
-#### Requirements for all uses of SuperMAG
+#### Requirements for all uses
 
 - Include the acknowledgement listed on the SuperMAG website.
 - Cite the appropriate technical papers for the stations used. See
@@ -808,7 +837,7 @@ scientific conclusions:
 Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T.,
 Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source Python package
 for ground-based magnetometers. *Frontiers in Astronomy and Space Sciences*,
-9, 1005061, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
+9, 1005061.
 
 #### SuperMAG
 
@@ -818,16 +847,12 @@ Gjerloev, J. W. (2012), The SuperMAG data processing technique,
 
 ### Collaborator references for SuperMag
 
-#### AUTUMNX
-
-Connors, M., Schofield, I., Reiter, K., Chi, P. J., Rowe, K. M., & Russell, C. T. (2016). The AUTUMNX magnetometer meridian chain in Québec, Canada. *Earth, Planets and Space*, 68(1), 2, [doi:10.1186/s40623-015-0354-4](https://doi.org/10.1186/s40623-015-0354-4).
-
 #### EMMA
 
 Lichtenberger, J., M. Clilverd, B. Heilig, M. Vellante, J. Manninen,
 C. Rodger, A. Collier, A. Jørgensen, J. Reda, R. Holzworth, and R. Friedel
 (2013), The plasmasphere during a space weather event: First results from the
-PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23, [doi:10.1051/swsc/2013045](http://dx.doi.org/10.1051/swsc/2013045).
+PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23.
 
 #### IMAGE Chain
 
@@ -857,7 +882,7 @@ of the plasmasphere by Mid-continent MAgnetoseismic Chain magnetometers,
 
 Yumoto, K., and the CPMN Group (2001), Characteristics of Pi 2 magnetic
 pulsations observed at the CPMN stations: A review of the STEP results,
-*Earth, Planets and Space*, 53, 981–992, [doi:10.1186/BF03351695](https://doi.org/10.1186/BF03351695).
+*Earth, Planets and Space*, 53, 981–992.
 
 #### CARISMA
 
@@ -897,7 +922,8 @@ Response of the Auroral Electrojet Indices to Abrupt Southward IMF Turnings,
 
 Newell, P. T., and J. W. Gjerloev (2014), Local geomagnetic indices and the
 prediction of auroral power, *Journal of Geophysical Research: Space Physics*,
-119, [doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
+119,
+[doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
 
 #### SMR and SMR-LT
 
@@ -940,7 +966,7 @@ If you use ExploreMag to download data from SuperMag, please cite the SuperMag s
 
 If ExploreMag is used for downloading higher cadence data from THEMIS, CARISMA, and IMAGE chains, please also cite the gmag Python package that makes the download possible:
 
-Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T., Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source python package for ground-based magnetometers. Frontiers in Astronomy and Space Sciences, 9, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
+Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T., Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source python package for ground-based magnetometers. Frontiers in Astronomy and Space Sciences, 9, 1005061.
 
 The following sources support the terminology and analysis conventions described above. They do not imply that ExploreMag reproduces every method or statistical assumption in each paper.
 
