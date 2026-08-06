@@ -2172,7 +2172,7 @@ class SuperMAGDownloadViewer:
             command=self.on_plot_mode_change,
         ).grid(row=4, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(controls, text="Plot coordinates").grid(
+        ttk.Label(controls, text="Data coordinates").grid(
             row=5, column=0, sticky="w", pady=(7, 0)
         )
         coordinate_box = ttk.Combobox(
@@ -4238,7 +4238,7 @@ class SuperMAGDownloadViewer:
             self._active_coordinate_data()
         except ValueError as exc:
             self.plot_coordinate_var.set("NEZ")
-            messagebox.showerror("Plot coordinates", str(exc))
+            messagebox.showerror("Data coordinates", str(exc))
         self.plot_selected_station()
         if self.manual_stack_window is not None and self.manual_stack_window.winfo_exists():
             self._rebuild_manual_stackplot()

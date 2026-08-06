@@ -918,6 +918,7 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
         )
         self.map_cadence_var = tk.StringVar(value="")
         self.map_vector_parameter_var = tk.StringVar(value=self.MAP_NONE)
+        self.map_vector_coordinate_var = tk.StringVar(value="NEZ")
         self.map_vector_scale_var = tk.StringVar(value="")
         self.map_vector_arrow_size_var = tk.StringVar(value="1")
         self.map_colormap_var = tk.StringVar(value="RdBu_r")
@@ -1551,7 +1552,14 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 values=(self.MAP_NONE, *self.VECTOR_MAP_OPTIONS),
                 state="readonly",
                 width=19,
-            ).grid(row=map_row, column=2, sticky="ew")
+            ).grid(row=map_row, column=2, sticky="ew", padx=(0, 4))
+            viewer.ttk.Combobox(
+                controls,
+                textvariable=self.map_vector_coordinate_var,
+                values=("NEZ", "NEZ2GEO", "GEO"),
+                state="readonly",
+                width=9,
+            ).grid(row=map_row, column=3, sticky="ew")
             for widget in controls.winfo_children():
                 try:
                     if (
@@ -2849,7 +2857,8 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         if not self._map_selection_is_none(scalar):
             layers.append(scalar)
         if not self._map_selection_is_none(vector):
-            layers.append(vector)
+            coordinate = self.map_vector_coordinate_var.get().strip().upper()
+            layers.append(f"{vector} ({coordinate})")
         return " + ".join(layers) if layers else "map"
 
     def _map_output_token_for_layers(self, scalar_token: str = "") -> str:
@@ -2860,6 +2869,7 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 tokens.append(self.VECTOR_MAP_SPECS[vector][2])
             except KeyError as exc:
                 raise ValueError(f"Unknown vector map parameter: {vector}") from exc
+            tokens.append(self.map_vector_coordinate_var.get().strip().lower())
         return "_with_".join(tokens) if tokens else "map"
 
     def _selected_map_colormap(self) -> str:
@@ -2918,6 +2928,64 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             self._map_vector_derivative_cache = (north_dt, east_dt)
         return self._map_vector_derivative_cache
 
+    def _rotate_nez_vectors_to_geo(
+        self, north: np.ndarray, east: np.ndarray, time_index: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Rotate local magnetic NE vectors into geographic north/east."""
+        if self.data is None:
+            raise ValueError("No magnetic data are loaded.")
+        if ppigrf is None:
+            raise RuntimeError(
+                "NEZ2GEO map vectors require ppigrf (IGRF-14). Install it with: "
+                "python -m pip install ppigrf"
+            )
+        # ``data.times`` contains datetime-like objects (including netCDF4's
+        # ``real_datetime``), not Unix timestamps.  Converting one with
+        # float() raises the error reported by the map dialog.  Normalize via
+        # datetime64 so Python, NumPy, pandas, and netCDF datetime values all
+        # reach ppigrf as the naive UTC datetime it expects.
+        epoch = self._datetime64_to_datetime(
+            self._time_array_ns([self.data.times[time_index]])[0]
+        )
+        geo_north = np.full_like(north, np.nan, dtype=float)
+        geo_east = np.full_like(east, np.nan, dtype=float)
+        longitudes = np.asarray(
+            viewer.normalize_longitude(self.data.glon), dtype=float
+        )
+        latitudes = np.asarray(self.data.glat, dtype=float)
+        valid = (
+            np.isfinite(longitudes)
+            & np.isfinite(latitudes)
+            & np.isfinite(north)
+            & np.isfinite(east)
+        )
+        if not np.any(valid):
+            return geo_north, geo_east
+
+        # ppigrf broadcasts coordinate arrays, so calculate every usable
+        # station in one call.  This also avoids rereading IGRF coefficients
+        # once per station for every generated map frame.
+        east_field, north_field, _up_field = ppigrf.igrf(
+            longitudes[valid], latitudes[valid], 0.0, epoch
+        )
+        field_east = np.asarray(east_field, dtype=float).reshape(-1)
+        field_north = np.asarray(north_field, dtype=float).reshape(-1)
+        valid_indices = np.flatnonzero(valid)
+        usable_field = np.isfinite(field_east) & np.isfinite(field_north)
+        valid_indices = valid_indices[usable_field]
+        declination = np.arctan2(
+            field_east[usable_field], field_north[usable_field]
+        )
+        cosine = np.cos(declination)
+        sine = np.sin(declination)
+        geo_north[valid_indices] = (
+            north[valid_indices] * cosine - east[valid_indices] * sine
+        )
+        geo_east[valid_indices] = (
+            north[valid_indices] * sine + east[valid_indices] * cosine
+        )
+        return geo_north, geo_east
+
     def _vector_components_for_map(
         self, time_index: int
     ) -> tuple[np.ndarray, np.ndarray, str, str]:
@@ -2938,15 +3006,48 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         except KeyError as exc:
             raise ValueError(f"Unknown vector map parameter: {selection}") from exc
 
-        if derivative:
+        coordinate = self.map_vector_coordinate_var.get().strip().upper()
+        if coordinate not in {"NEZ", "NEZ2GEO", "GEO"}:
+            raise ValueError(f"Unknown vector coordinate selection: {coordinate}")
+
+        if coordinate == "GEO":
+            if self.data.geo is None:
+                raise ValueError("The loaded file does not contain GEO vector data.")
+            clean = viewer.mask_bad_magnetometer_values(self.data.geo[:, :, :2])
+            if derivative:
+                north_all = np.asarray(
+                    [viewer.finite_time_derivative(row, self.data.times) for row in clean[:, :, 0]],
+                    dtype=float,
+                )
+                east_all = np.asarray(
+                    [viewer.finite_time_derivative(row, self.data.times) for row in clean[:, :, 1]],
+                    dtype=float,
+                )
+                north = np.asarray(north_all[:, time_index], dtype=float)
+                east = np.asarray(east_all[:, time_index], dtype=float)
+            else:
+                north = np.asarray(clean[:, time_index, 0], dtype=float)
+                east = np.asarray(clean[:, time_index, 1], dtype=float)
+        elif derivative:
             north_all, east_all = self._horizontal_vector_derivatives()
             north = np.asarray(north_all[:, time_index], dtype=float)
             east = np.asarray(east_all[:, time_index], dtype=float)
-            units = "nT/min"
+            if coordinate == "NEZ2GEO":
+                north, east = self._rotate_nez_vectors_to_geo(
+                    north, east, time_index
+                )
         else:
             clean = viewer.mask_bad_magnetometer_values(self.data.nez[:, :, :2])
             north = np.asarray(clean[:, time_index, 0], dtype=float)
             east = np.asarray(clean[:, time_index, 1], dtype=float)
+            if coordinate == "NEZ2GEO":
+                north, east = self._rotate_nez_vectors_to_geo(
+                    north, east, time_index
+                )
+
+        if derivative:
+            units = "nT/min"
+        else:
             units = "nT"
 
         # In geographic east/north coordinates, a 90° clockwise rotation is
