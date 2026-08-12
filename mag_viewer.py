@@ -2008,16 +2008,16 @@ class SuperMAGDownloadViewer:
     # ----- UI construction -------------------------------------------------
 
     def _make_variables(self) -> None:
-        self.logon_var = tk.StringVar(value="cercer")
+        self.logon_var = tk.StringVar(value="logon_name")
         self.metadata_file_var = tk.StringVar(value="")
-        self.start_date_var = tk.StringVar(value="2024-05-12")
-        self.start_time_var = tk.StringVar(value="03:00")
-        self.end_date_var = tk.StringVar(value="2024-05-12")
-        self.end_time_var = tk.StringVar(value="06:00")
-        self.lat_min_var = tk.StringVar(value="25")
-        self.lat_max_var = tk.StringVar(value="85")
-        self.lon_west_var = tk.StringVar(value="-170")
-        self.lon_east_var = tk.StringVar(value="40")
+        self.start_date_var = tk.StringVar(value="YYYY-MM-DD")
+        self.start_time_var = tk.StringVar(value="HH:mm")
+        self.end_date_var = tk.StringVar(value="YYYY-MM-DD")
+        self.end_time_var = tk.StringVar(value="HH:mm")
+        self.lat_min_var = tk.StringVar(value="lat_min")
+        self.lat_max_var = tk.StringVar(value="lat_max")
+        self.lon_west_var = tk.StringVar(value="lon_west")
+        self.lon_east_var = tk.StringVar(value="lon_east")
         self.output_file_var = tk.StringVar(value=self._default_output_filename())
         self.high_resolution_var = tk.BooleanVar(value=False)
 
