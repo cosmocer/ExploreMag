@@ -10,7 +10,7 @@ ExploreMag is a desktop application for downloading, converting, inspecting, map
 > filtered trace or scalogram ridge is evidence to investigate, not by itself
 > proof of a physical mode or event onset. At all times, validate the results.
 
-The main program is `ExploreMag.py`. Keep it in the same directory as:
+The latest program is `ExploreMag_v2.py`. Keep it in the same directory as:
 
 - `mag_viewer.py` — download, NetCDF/CSV loading, map, and time-series viewer.
 - `mag_analyzer.py` — reusable Pi2 polarization calculations and figures.
@@ -35,7 +35,7 @@ The main program is `ExploreMag.py`. Keep it in the same directory as:
 - [Wavelet scalograms](#wavelet-scalograms)
 - [Pi-band analysis](#pi-band-analysis)
 - [Pc-band analysis](#pc-band-analysis)
-- [Total ULF wave power](#total-ulf-wave-power)
+- [ULF wave power](#ulf-wave-power)
 - [Pi2 ellipse and polarization analysis](#pi2-ellipse-and-polarization-analysis)
 - [Saving and exporting](#saving-and-exporting)
 - [Troubleshooting](#troubleshooting)
@@ -75,13 +75,13 @@ with the remaining dependencies; a separate manual clone is not needed.
 ## Running ExploreMag
 
 ```bash
-python ExploreMag.py
+python ExploreMag_v2.py
 ```
 
 An existing supported file can be opened at startup:
 
 ```bash
-python ExploreMag.py path/to/magnetic_data.nc
+python ExploreMag_v2.py path/to/magnetic_data.nc
 ```
 
 Supported input includes suite-format NetCDF, native-cadence GMAG NetCDF4
@@ -125,9 +125,6 @@ The interface is easiest to understand as four connected areas.
 - All entered times are UTC. Analysis dialogs use
   `YYYY-MM-DD HH:mm:SS`; download entries may display date and time separately.
 - **NEZ** means local magnetic north, local magnetic east, and vertical down.
-- **NEZ2GEO** is available for map vectors and rotates the loaded NEZ
-  horizontal components into geographic north/east using the IGRF field
-  direction at each station and map timestamp.
 - **GEO** means geographic north, geographic east, and vertical down, when the
   loaded file contains GEO components.
 - `dBh = sqrt(dBn² + dBe²)` is the nonnegative horizontal magnitude derived
@@ -169,9 +166,10 @@ magnetospheric event for the first time.
    **Pc pulsations** on a shorter interval chosen from the raw and wavelet
    views. Compare the filtered waveform with the unfiltered components; do not
    classify an event solely because a filter returns an oscillation.
-9. **Map integrated short-period power.** Use **Total ULF wave power** to compare
-   5–150 s horizontal power between stations. Treat interpolation and unequal
-   station noise floors as possible spatial biases.
+9. **Map ULF power.** Use **ULF bandpass power** to compare 5–600 s horizontal
+   broad-band power, or **ULF SuperMAG equivalent** to compare the
+   Morlet-integrated Pc2 + Pc3 + Pc4 + Pc5 product. Treat interpolation and
+   unequal station noise floors as possible spatial biases.
 10. **Run the strict Pi2 workflow last.** Define non-overlapping Pi2 and quiet
     windows, optionally enter an independent onset marker, choose coordinates,
     confirm signs only when justified, and analyze selected stations. Inspect
@@ -426,19 +424,6 @@ as a qualitative proxy for equivalent ionospheric-current direction, but the
 relationship depends on ionospheric and Earth conductivity and must not be
 treated as a direct current measurement.
 
-The vector-coordinate selector provides three ways to orient arrows on the
-geographic map:
-
-- **NEZ** plots the loaded local magnetic north/east components directly.
-- **NEZ2GEO** rotates the loaded NEZ components into geographic north/east at
-  each station and timestamp using IGRF-14. This option requires `ppigrf` but
-  does not require a GEO variable in the loaded file.
-- **GEO** plots the file's geographic north/east components directly and is
-  available only when the loaded file contains GEO data.
-
-The selected coordinate option applies to all four vector quantities and does
-not affect the scalar map layer when scalar and vector maps are overlaid.
-
 - When start equals end, ExploreMag opens one interactive map.
 - When start precedes end, it creates a sequence at **Plot cadence (s)**.
 - **Unit vector scale** fixes a reference magnitude across frames; **Arrow
@@ -458,6 +443,26 @@ NetCDF file. Select **Plot SuperMAG indices** and create the plot. ExploreMag
 can display SME/SML/SMU families, sunlit and dark-sector variants, regional
 SMU_R/SML_R by MLT, and SMR. Index changes provide context; they do not replace
 inspection of the contributing stations or establish a unique onset time.
+
+### Time/value readouts and legends
+
+In v2, time-series figures use a synchronized vertical dashed cursor. Move the
+pointer over a subplot to display the nearest UTC time and the values of all
+visible series on that axis; the dashed line is shown at the same time across
+the related subplots. The last position remains visible when the pointer moves
+to **Save PNG…**, so the marker and readout are included in the saved figure.
+Right-click inside the figure to clear the marker.
+
+This behavior applies to the embedded single-station plot, automatic and
+manual stacks, pulsation plots, ULF series, SuperMAG-index line plots, and
+other generated time-series figures. Scalograms report the nearest UTC time,
+period, and power instead of line-series values.
+
+When multiple subplots contain the same named series, v2 places one global
+legend beneath the figure title and removes the duplicate subplot legends.
+Figures whose panels contain different parameter sets retain the legends
+needed to distinguish those panels. The same legend layout is used in saved
+PNGs.
 
 ## Pulsation analysis prerequisites
 
@@ -579,33 +584,46 @@ inside a Pc band is not sufficient to identify a field-line resonance. Look for
 coherence, repeatable frequency, amplitude maxima and phase changes across a
 latitudinal array, and appropriate local-time behavior.
 
-## Total ULF wave power
+## ULF wave power
 
-ExploreMag's **Total ULF wave power** is not imported from SuperMag.
+ExploreMag v2 provides two related ULF map buttons. Both products are
+calculated locally from the opened magnetic data; neither is an official value
+downloaded from SuperMAG.
 
-It is a derived product from the available data set, and it does not reflect
-all possible ULF energy. For each station it:
+| Button | Product mapped at each station | Map display |
+| --- | --- | --- |
+| **ULF bandpass power** | Mean running horizontal power from one 5–600 s fourth-order zero-phase Butterworth band pass | nT² on a logarithmic colour scale |
+| **ULF SuperMAG equivalent** | Mean scale-integrated Morlet Pc2 + Pc3 + Pc4 + Pc5 horizontal power | `log10(nT²)` |
 
-1. applies the resolvable portion of the requested 5–150 s fourth-order
-   zero-phase band pass to the two horizontal components; when cadence cannot
-   resolve the short-period edge, ExploreMag raises that edge instead of
-   rejecting the entire station (for example, 10-second data use approximately
-   21.1–150 s);
-2. calculates instantaneous horizontal power
-   `P(t) = dB1_filtered² + dB2_filtered²` in nT²;
-3. smooths it with a running mean of
-   `max(3, round(10 seconds / cadence))` samples—approximately 10 seconds for
-   1-second and 2-Hz data, 30 seconds for 10-second data, and three minutes for
-   1-minute data;
-4. displays station power series and a geographic station map.
+The broad-band product filters both horizontal components, calculates
+`P(t) = dB1_filtered² + dB2_filtered²`, and applies a running mean of
+`max(3, round(10 seconds / cadence))` samples. When cadence cannot resolve the
+5 s edge, the effective short-period edge is raised and reported.
 
-The 5–150 s range combines Pc2, Pc3, Pc4, Pi1, and Pi2 timescales. Therefore
-the product measures enhanced short-period horizontal activity but does not
-separate continuous and impulsive classes or identify a wave mode. In wave
-studies, power is normally interpreted together with spectra, coherence,
-phase, polarization, duration, and spatial structure. Welch's foundational
-method averages modified periodograms to reduce spectral-estimate variance
-([Welch, 1967](https://research.ibm.com/publications/the-use-of-fast-fourier-transform-for-the-estimation-of-power-spectra-a-method-based-on-time-averaging-over-short-modified-periodograms)).
+The SuperMAG-equivalent comparison product uses the same complex Morlet
+wavelet convention as the scalograms (`ω0 = 6`). It integrates wavelet power
+separately over Pc2 (5–10 s), Pc3 (10–45 s), Pc4 (45–150 s), and Pc5
+(150–600 s), then sums the available bands. Its scale weighting follows the
+Torrence and Compo scale-averaged wavelet-power form, preserving nT² before
+the plotting layer applies `log10`. “Equivalent” describes a local method
+comparison; it does not certify numerical identity with an official SuperMAG
+product.
+
+ULF calculations prefer one hour of continuous input context before and after
+the displayed interval to reduce filter and wavelet edge effects. When full
+context is unavailable, v2 tries progressively shorter padding and reports the
+padding actually used. The plotted and exported time range is trimmed back to
+the requested interval.
+
+For diagnostics, v2 also calculates the sum of separately filtered
+Butterworth Pc2–Pc5 powers. This third local series is available in the
+four-method comparison window alongside broad-band power, Morlet-integrated
+power, and an optional official SuperMAG reference.
+
+These products span several Pc and Pi timescales and do not by themselves
+distinguish continuous from impulsive pulsations or identify a wave mode.
+Interpret power together with spectra, coherence, phase, polarization,
+duration, station coverage, and spatial structure.
 
 Validate the product for your use-case before using it for scientific
 publication.
@@ -613,15 +631,28 @@ publication.
 ### Using the ULF window
 
 1. Select multiple stations and set a plot interval.
-2. Click **Total ULF wave power**.
-3. Inspect the map for regional maxima, then click a station for its detailed
-   raw components, filtered components, running power, and scalogram.
-4. Select map bubbles and use the multi-station power stack to compare timing.
-   **Remove selection** clears all selected map stations. Adjust displayed time
-   and per-axis y limits without recomputing the underlying data; each **Auto**
-   button and **Auto-scale all Y axes** restore data-based scaling after manual
-   limits have been applied.
-5. Export the multi-station power CSV and save the map/figures.
+2. Click **ULF bandpass power** or **ULF SuperMAG equivalent**. The chosen
+   method determines the map values and the initially selected time series.
+3. Inspect the map for regional maxima. Double-click a station bubble to open
+   its three-panel detail figure: broad-band/Butterworth comparison, Morlet
+   total and individual Pc bands, and the horizontal scalogram.
+4. Left-click map bubbles to select stations, then click **Plot multi-station
+   time series**. **Remove selection** clears all selected map stations.
+5. Under **Power shown in all subplots**, independently select **5–600 s
+   broad-band power**, **Morlet-integrated Pc2 + Pc3 + Pc4 + Pc5**, and any
+   individual Morlet Pc2, Pc3, Pc4, and Pc5 bands. Every selected series is
+   drawn together. Clearing the Morlet-total checkbox removes that series;
+   selecting it adds the series again.
+6. Switch all ordinates between linear power and explicit `log10(power)`.
+   Adjust the displayed UTC range and each station's y limits without
+   recomputing the products. **Auto** and **Auto-scale all Y axes** restore
+   data-based scaling.
+7. Optionally click **Load official SuperMAG ULF NetCDF…**, then **Show
+   four-method comparison**. Recognized station aliases include DAT/R08,
+   RADI/T52, SNKQ/T31, SEPT-ILES/T49, and OTT.
+8. Export the displayed-range ULF data and save the map and figures. The CSV
+   includes broad-band power, the separate-Butterworth Pc sum, Morlet total,
+   individual Morlet bands, any matched official series, and processing notes.
 
 Compare stations cautiously: sensor response, cadence conversion, repaired
 samples, local conductivity, baseline, and noise floor can change apparent
@@ -704,8 +735,14 @@ are broadly consistent, and results are not dominated by filter edges.
 ## Saving and exporting
 
 - Use each figure's **Save PNG…** control for maps and analysis figures.
+- To include a time/value marker, move the cursor to the desired sample before
+  clicking **Save PNG…**. The last dashed marker and annotation persist while
+  the pointer moves to the button; right-click the plot to clear them.
+- Repeated series names across subplots are represented by one global legend
+  beneath the title in both the window and saved PNG.
 - Pulsation windows export filtered Pi or Pc component time series as CSV.
-- Total ULF windows export time-resolved station power as CSV.
+- ULF windows export time-resolved broad-band, Butterworth Pc-sum, Morlet
+  total/band, and available official-reference power as CSV.
 - The manual stack exports selected point annotations as text.
 - GMAG downloads create a NetCDF plus a station report containing source,
   cadence, coverage, baseline, and processing outcomes.
@@ -722,8 +759,9 @@ quality screening, filter periods, and any manual axis/color limits.
 
 The cadence violates Nyquist, the selected interval is too short for stable
 forward-backward filtering, or it does not contain enough cycles. Use faster
-data and/or a longer interval. Total ULF power is a special case: it uses and
-reports the resolvable part of 5–150 s when a nonempty portion remains.
+data and/or a longer interval. Broad-band ULF power is a special case: it uses
+and reports the resolvable part of 5–600 s when a nonempty portion remains.
+Morlet Pc2–Pc5 output similarly reports cadence- or duration-limited bands.
 
 ### A station disappears from Pi2 results
 
@@ -853,22 +891,25 @@ scientific conclusions:
 Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T.,
 Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source Python package
 for ground-based magnetometers. *Frontiers in Astronomy and Space Sciences*,
-9, 1005061.
+9, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
 
 #### SuperMAG
 
 Gjerloev, J. W. (2012), The SuperMAG data processing technique,
-*Journal of Geophysical Research*, 117, A09213,
-[doi:10.1029/2012JA017683](https://doi.org/10.1029/2012JA017683).
+*Journal of Geophysical Research*, 117, A09213, [doi:10.1029/2012JA017683](https://doi.org/10.1029/2012JA017683).
 
 ### Collaborator references for SuperMag
+
+#### AUTUMN/AUTUMNX
+
+Connors, M., Schofield, I., Reiter, K., Chi, P. J., Rowe, K. M., & Russell, C. T. (2016). The AUTUMNX magnetometer meridian chain in Québec, Canada. *Earth, Planets and Space*, 68(1), 2, [doi:10.1186/s40623-015-0354-4](https://doi.org/10.1186/s40623-015-0354-4).
 
 #### EMMA
 
 Lichtenberger, J., M. Clilverd, B. Heilig, M. Vellante, J. Manninen,
 C. Rodger, A. Collier, A. Jørgensen, J. Reda, R. Holzworth, and R. Friedel
 (2013), The plasmasphere during a space weather event: First results from the
-PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23.
+PLASMON project, *Journal of Space Weather and Space Climate*, 3, A23, [doi:10.1051/swsc/2013045](https://doi.org/10.1051/swsc/2013045 ).
 
 #### IMAGE Chain
 
@@ -882,8 +923,7 @@ Engebretson, M. J., W. J. Hughes, J. L. Alford, E. Zesta, L. J. Cahill Jr.,
 R. L. Arnoldy, and G. D. Reeves (1995), Magnetometer array for cusp and cleft
 studies observations of the spatial extent of broadband ULF magnetic
 pulsations at cusp/cleft latitudes, *Journal of Geophysical Research*, 100,
-19371–19386,
-[doi:10.1029/95JA00768](https://doi.org/10.1029/95JA00768).
+19371–19386, [doi:10.1029/95JA00768](https://doi.org/10.1029/95JA00768).
 
 #### McMAC Chain
 
@@ -891,33 +931,29 @@ Chi, P. J., M. J. Engebretson, M. B. Moldwin, C. T. Russell, I. R. Mann,
 M. R. Hairston, M. Reno, J. Goldstein, L. I. Winkler, J. L. Cruz-Abeyro,
 D.-H. Lee, K. Yumoto, R. Dalrymple, B. Chen, and J. P. Gibson (2013), Sounding
 of the plasmasphere by Mid-continent MAgnetoseismic Chain magnetometers,
-*Journal of Geophysical Research: Space Physics*, 118,
-[doi:10.1002/jgra.50274](https://doi.org/10.1002/jgra.50274).
+*Journal of Geophysical Research: Space Physics*, 118, [doi:10.1002/jgra.50274](https://doi.org/10.1002/jgra.50274).
 
 #### MAGDAS / 210 Chain
 
 Yumoto, K., and the CPMN Group (2001), Characteristics of Pi 2 magnetic
 pulsations observed at the CPMN stations: A review of the STEP results,
-*Earth, Planets and Space*, 53, 981–992.
+*Earth, Planets and Space*, 53, 981–992, [doi:10.1186/BF03351695](https://doi.org/10.1186/BF03351695).
 
 #### CARISMA
 
 Mann, I. R., et al. (2008), The upgraded CARISMA magnetometer array in the
-THEMIS era, *Space Science Reviews*, 141, 413–451,
-[doi:10.1007/s11214-008-9457-6](https://doi.org/10.1007/s11214-008-9457-6).
+THEMIS era, *Space Science Reviews*, 141, 413–451, [doi:10.1007/s11214-008-9457-6](https://doi.org/10.1007/s11214-008-9457-6).
 
 #### AAL-PIP
 
 Clauer, C. R., et al. (2014), An autonomous adaptive low-power instrument
 platform (AAL-PIP) for remote high-latitude geospace data collection,
-*Geoscientific Instrumentation, Methods and Data Systems*, 3, 211–227,
-[doi:10.5194/gi-3-211-2014](https://doi.org/10.5194/gi-3-211-2014).
+*Geoscientific Instrumentation, Methods and Data Systems*, 3, 211–227, [doi:10.5194/gi-3-211-2014](https://doi.org/10.5194/gi-3-211-2014).
 
 #### INTERMAGNET
 
 Love, J. J., and A. Chulliat (2013), An international network of magnetic
-observatories, *Eos*, 94(42), 373–374,
-[doi:10.1002/2013EO420001](https://doi.org/10.1002/2013EO420001).
+observatories, *Eos*, 94(42), 373–374, [doi:10.1002/2013EO420001](https://doi.org/10.1002/2013EO420001).
 
 ### SuperMAG index references
 
@@ -925,27 +961,24 @@ observatories, *Eos*, 94(42), 373–374,
 
 Newell, P. T., and J. W. Gjerloev (2011), Evaluation of SuperMAG auroral
 electrojet indices as indicators of substorms and auroral power,
-*Journal of Geophysical Research*, 116, A12211,
-[doi:10.1029/2011JA016779](https://doi.org/10.1029/2011JA016779).
+*Journal of Geophysical Research*, 116, A12211, [doi:10.1029/2011JA016779](https://doi.org/10.1029/2011JA016779).
 
 #### SMLs, SMLd, SMUs, and SMUd
 
 Gjerloev, J. W., R. A. Hoffman, S. Ohtani, J. Weygand, and R. Barnes (2010),
 Response of the Auroral Electrojet Indices to Abrupt Southward IMF Turnings,
-*Annales Geophysicae*, 28, 1167–1182.
+*Annales Geophysicae*, 28, 1167–1182, [doi:10.5194/angeo-28-1167-2010](https://doi.org/10.5194/angeo-28-1167-2010).
 
 #### SME-LT, SMU-LT, and SML-LT
 
 Newell, P. T., and J. W. Gjerloev (2014), Local geomagnetic indices and the
 prediction of auroral power, *Journal of Geophysical Research: Space Physics*,
-119,
-[doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
+119, [doi:10.1002/2014JA020524](https://doi.org/10.1002/2014JA020524).
 
 #### SMR and SMR-LT
 
 Newell, P. T., and J. W. Gjerloev (2012), SuperMAG-Based Partial Ring Current
-Indices, *Journal of Geophysical Research*, 117,
-[doi:10.1029/2012JA017586](https://doi.org/10.1029/2012JA017586).
+Indices, *Journal of Geophysical Research*, 117, [doi:10.1029/2012JA017586](https://doi.org/10.1029/2012JA017586).
 
 ### Substorm-list references
 
@@ -972,9 +1005,7 @@ Indices, *Journal of Geophysical Research*, 117,
   characteristic scales inferred from the SuperMAG auroral electrojet indices,
   *Journal of Geophysical Research*, 116, A12232,
   [doi:10.1029/2011JA016936](https://doi.org/10.1029/2011JA016936).
-- Ohtani, S., and J. Gjerloev (2020), Is the Substorm Current Wedge an Ensemble
-  of Wedgelets?: Revisit to Midlatitude Positive Bays, accepted,
-  *Journal of Geophysical Research*.
+- Ohtani, S., & Gjerloev, J. W. (2020). Is the substorm current wedge an ensemble of wedgelets?: Revisit to midlatitude positive bays. *Journal of Geophysical Research: Space Physics*, 125(9), e2020JA027902, [doi:10.1029/2020JA027902](https://doi.org/10.1029/2020JA027902).
 
 ## Literature and conventions
 
@@ -982,7 +1013,10 @@ If you use ExploreMag to download data from SuperMag, please cite the SuperMag s
 
 If ExploreMag is used for downloading higher cadence data from THEMIS, CARISMA, and IMAGE chains, please also cite the gmag Python package that makes the download possible:
 
-Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T., Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source python package for ground-based magnetometers. Frontiers in Astronomy and Space Sciences, 9, 1005061.
+Murphy, K. R., Rae, I. J., Halford, A. J., Engebretson, M., Russell, C. T.,
+Matzka, J., ... & Tanskanen, E. (2022). GMAG: An open-source Python package
+for ground-based magnetometers. *Frontiers in Astronomy and Space Sciences*,
+9, [doi:10.3389/fspas.2022.1005061](https://doi.org/10.3389/fspas.2022.1005061).
 
 The following sources support the terminology and analysis conventions described above. They do not imply that ExploreMag reproduces every method or statistical assumption in each paper.
 

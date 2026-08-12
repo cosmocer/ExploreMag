@@ -40,7 +40,7 @@ enforced by the selected download mode.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -614,8 +614,23 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
         ("Pi3/Ps6", 150.0, None),
     )
     SCALOGRAM_PERIOD_RANGE = (5.0, 600.0)
-    TOTAL_ULF_PERIOD_RANGE = (5.0, 150.0)
-    ULF_DETAIL_SCALOGRAM_RANGE = (5.0, 200.0)
+    TOTAL_ULF_PERIOD_RANGE = (5.0, 600.0)
+    ULF_DETAIL_SCALOGRAM_RANGE = (5.0, 600.0)
+    SUPERMAG_EQUIVALENT_PADDING_SECONDS = 3600.0  # one hour on each side
+    MORLET_SCALE_DJ = 1.0 / 24.0
+    MORLET_CDELTA = 0.776  # Torrence & Compo (1998), Morlet omega0=6
+    ULF_METHOD_BROADBAND = "broadband"
+    ULF_METHOD_MORLET = "morlet"
+    # Optional aliases used only when associating an official SuperMAG ULF
+    # NetCDF reference with the currently loaded station code.  These are the
+    # explicit station-name mappings used by SuperMAG in the comparison plots.
+    SUPERMAG_ULF_STATION_ALIASES = {
+        "DAT": "R08", "R08": "DAT",
+        "RADI": "T52", "T52": "RADI",
+        "SNKQ": "T31", "SNK": "T31", "T31": "SNKQ",
+        "SEPT-ILES": "T49", "SEPTILES": "T49", "T49": "SEPT-ILES",
+        "OTT": "OTT",
+    }
     SUPERMAG_INDEX_ABSOLUTE_LIMIT = 1.0e5
 
     # For a nearly circular ellipse the major-axis azimuth is poorly
@@ -651,6 +666,8 @@ class ExploreMagAnalyzer(viewer.SuperMAGDownloadViewer):
         self._supermag_indices_file: Optional[Path] = None
         self._pi3_ps6_map_cache: Optional[np.ndarray] = None
         self._total_ulf_map_cache: Optional[np.ndarray] = None
+        self._ulf_product_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._supermag_ulf_reference: dict[str, Any] = {}
         self._map_vector_derivative_cache: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._download_start_entry = None
         self._download_end_entry = None
@@ -2747,9 +2764,18 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         ).grid(row=1, column=1, sticky="ew", padx=(0, 4), pady=(6, 0))
         viewer.ttk.Button(
             frame,
-            text="Total ULF wave power",
-            command=self.show_total_ulf_wave_power_map,
+            text="ULF bandpass power",
+            command=lambda: self.show_total_ulf_wave_power_map(
+                method=self.ULF_METHOD_BROADBAND
+            ),
         ).grid(row=1, column=2, sticky="ew", padx=4, pady=(6, 0))
+        viewer.ttk.Button(
+            frame,
+            text="ULF SuperMAG equivalent",
+            command=lambda: self.show_total_ulf_wave_power_map(
+                method=self.ULF_METHOD_MORLET
+            ),
+        ).grid(row=1, column=3, sticky="ew", padx=(4, 0), pady=(6, 0))
 
         selection_row = viewer.ttk.Frame(frame)
         selection_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -2784,6 +2810,8 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         self._pi2_results.clear()
         self._pi3_ps6_map_cache = None
         self._total_ulf_map_cache = None
+        self._ulf_product_cache.clear()
+        self._supermag_ulf_reference = {}
         self._map_vector_derivative_cache = None
         super().set_loaded_data(data)
         self.pi2_coordinate_var.set("GEO" if data.geo is not None else "NEZ")
@@ -3305,14 +3333,14 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         if selection == "Total ULF":
             return (
                 self._total_ulf_map_data(),
-                "Running horizontal ULF wave power (nT²; 5–150 s)",
+                "Horizontal bandpass power over 5–600 s (nT²)",
                 "Total_ULF",
                 False,
             )
         return viewer.SuperMAGDownloadViewer._map_parameter_data(self)
 
     def _total_ulf_map_data(self) -> np.ndarray:
-        """Return running 5–150 s horizontal power for every station and sample."""
+        """Return running 5–600 s horizontal bandpass power for every station/sample."""
         if self.data is None:
             raise ValueError("No magnetic data are loaded.")
         if self._total_ulf_map_cache is not None:
@@ -3340,7 +3368,7 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                     x, x[finite], source[station, finite, component]
                 )
             try:
-                filtered = self._bandpass_components(
+                filtered, _, _ = self._ulf_bandpass_components(
                     regular, cadence, *self.TOTAL_ULF_PERIOD_RANGE
                 )
             except ValueError:
@@ -3937,6 +3965,11 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         super().plot_selected_station()
         if self.single_plot_ax is None or self.single_canvas is None:
             return
+        cursor_axes = (
+            self._time_series_axes(self.single_figure)
+            if self.single_figure is not None else [self.single_plot_ax]
+        )
+        self._attach_time_value_cursor(self.single_canvas, cursor_axes)
         onset = self._parse_optional_onset(strict=False)
         if onset is None:
             return
@@ -3963,6 +3996,28 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 list(unique.values()), list(unique.keys()), loc="upper right", fontsize=8
             )
         self.single_canvas.draw_idle()
+
+    def _rebuild_manual_stackplot(self) -> None:
+        """Rebuild the inherited manual stack and add synchronized readouts."""
+        super()._rebuild_manual_stackplot()
+        if self.manual_stack_canvas is not None and self.manual_stack_figure is not None:
+            if self._shared_figure_legend(
+                self.manual_stack_figure, list(self._manual_stack_axes)
+            ):
+                self.manual_stack_figure.subplots_adjust(top=0.85)
+            self._attach_time_value_cursor(
+                self.manual_stack_canvas,
+                self._time_series_axes(self.manual_stack_figure),
+            )
+
+    def create_selected_plots(self) -> None:
+        """Create inherited plots and add readouts to new stack windows."""
+        super().create_selected_plots()
+        for record in getattr(self, "_automatic_stack_plots", []):
+            canvas = record.get("canvas")
+            axis = record.get("axis")
+            if canvas is not None and axis is not None:
+                self._attach_time_value_cursor(canvas, [axis])
 
 
     # ------------------------------------------------------------------
@@ -4477,6 +4532,266 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             note = f"{minimum_period_s:g}–{maximum_period_s:g} s"
         return filtered, effective_minimum, note
 
+    @classmethod
+    def _morlet_pc_integrated_powers(
+        cls,
+        horizontal_values: np.ndarray,
+        cadence_s: float,
+    ) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
+        """Return scale-integrated Morlet power for Pc2--Pc5 in nT^2.
+
+        The transform uses the same Morlet omega0=6 implementation as the
+        ExploreMag scalograms.  Band integration follows the scale-averaged
+        wavelet-power form of Torrence & Compo (1998):
+
+            P(t) = dj / Cdelta * sum_j(|W(t,s_j)|^2 / s_j_samples)
+
+        with logarithmically spaced scales.  This preserves nT^2 units and
+        avoids summing raw wavelet coefficients whose magnitude depends on
+        scale density.  The shortest usable period is cadence-limited.
+        """
+        values = np.asarray(horizontal_values, dtype=float)
+        if values.ndim != 2 or values.shape[1] < 2:
+            raise ValueError("Morlet ULF input must have shape (time, >=2).")
+        if len(values) < 32:
+            raise ValueError("At least 32 samples are required for Morlet ULF power.")
+        cadence = float(cadence_s)
+        if not np.isfinite(cadence) or cadence <= 0.0:
+            raise ValueError("A positive cadence is required for Morlet ULF power.")
+
+        minimum_period, maximum_period = cls.TOTAL_ULF_PERIOD_RANGE
+        effective_minimum = max(float(minimum_period), 2.2 * cadence)
+        duration_s = (len(values) - 1) * cadence
+        # Preserve the requested upper edge when the record contains at least
+        # two cycles.  Shorter records are explicitly cadence/duration limited.
+        effective_maximum = min(float(maximum_period), duration_s / 2.0)
+        if effective_maximum <= effective_minimum * 1.01:
+            raise ValueError(
+                f"The available {duration_s:g} s record cannot resolve a useful "
+                f"{minimum_period:g}-{maximum_period:g} s Morlet ULF range."
+            )
+
+        dj = float(cls.MORLET_SCALE_DJ)
+        reference_period = float(minimum_period)
+        first_index = int(np.ceil(np.log2(effective_minimum / reference_period) / dj))
+        last_index = int(np.floor(np.log2(effective_maximum / reference_period) / dj))
+        if last_index < first_index:
+            raise ValueError("No logarithmic Morlet scales fall inside the usable ULF range.")
+        scale_indices = np.arange(first_index, last_index + 1, dtype=float)
+        periods = reference_period * np.power(2.0, scale_indices * dj)
+
+        horizontal_power = cls._horizontal_wavelet_power(values[:, :2], cadence, periods)
+        omega0 = 6.0
+        fourier_factor = 4.0 * np.pi / (omega0 + np.sqrt(2.0 + omega0**2))
+        scale_samples = periods / (fourier_factor * cadence)
+        scale_weight = dj / float(cls.MORLET_CDELTA)
+
+        band_powers: dict[str, np.ndarray] = {}
+        band_notes: list[str] = []
+        for band_number, (name, band_min, band_max) in enumerate(cls.PC_BANDS):
+            lower = max(float(band_min), effective_minimum)
+            upper = min(float(band_max), effective_maximum)
+            if upper <= lower:
+                band_powers[name] = np.full(len(values), np.nan, dtype=float)
+                band_notes.append(f"{name}: unavailable")
+                continue
+            if band_number == len(cls.PC_BANDS) - 1:
+                band_mask = (periods >= lower) & (periods <= upper)
+            else:
+                band_mask = (periods >= lower) & (periods < upper)
+            if not np.any(band_mask):
+                band_powers[name] = np.full(len(values), np.nan, dtype=float)
+                band_notes.append(f"{name}: no resolved scale")
+                continue
+            band_power = scale_weight * np.sum(
+                horizontal_power[band_mask]
+                / scale_samples[band_mask, None],
+                axis=0,
+            )
+            band_powers[name] = np.asarray(band_power, dtype=float)
+            if lower > float(band_min) * 1.01 or upper < float(band_max) * 0.99:
+                band_notes.append(f"{name}: {lower:.1f}-{upper:.1f} s")
+
+        stack = np.vstack([band_powers[name] for name, _, _ in cls.PC_BANDS])
+        finite_count = np.sum(np.isfinite(stack), axis=0)
+        total = np.nansum(stack, axis=0)
+        total[finite_count == 0] = np.nan
+        note = f"Morlet Pc2-Pc5 ({effective_minimum:.1f}-{effective_maximum:.1f} s resolved)"
+        if band_notes:
+            note += "; " + "; ".join(band_notes)
+        return band_powers, total, note
+
+    @classmethod
+    def _separate_pc_butterworth_power(
+        cls,
+        horizontal_values: np.ndarray,
+        cadence_s: float,
+    ) -> tuple[np.ndarray, dict[str, str]]:
+        """Return the sum of separately filtered Pc2--Pc5 horizontal powers."""
+        values = np.asarray(horizontal_values, dtype=float)
+        summed = np.zeros(len(values), dtype=float)
+        used = np.zeros(len(values), dtype=bool)
+        notes: dict[str, str] = {}
+        for name, band_min, band_max in cls.PC_BANDS:
+            try:
+                filtered, _, band_note = cls._ulf_bandpass_components(
+                    values[:, :2], cadence_s, band_min, band_max
+                )
+                summed += np.sum(filtered**2, axis=1)
+                used[:] = True
+                notes[name] = band_note
+            except ValueError as exc:
+                notes[name] = f"unavailable: {exc}"
+        if not np.any(used):
+            raise ValueError("None of the Pc2-Pc5 Butterworth bands is resolvable.")
+        averaging_samples = max(3, int(round(10.0 / float(cadence_s))))
+        return cls._rolling_mean(summed, averaging_samples), notes
+
+    def _padded_station_ulf_timeseries(
+        self,
+        station_index: int,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[np.ndarray, np.ndarray, float, tuple[str, str], str, str]:
+        """Use one hour of context on each side when continuous data permit it.
+
+        The preferred input therefore adds two hours of context in total.  If a
+        gap exists only in that context, progressively shorter padding is tried
+        rather than making the requested plotting interval unusable.
+        """
+        if self.data is None:
+            raise ValueError("No magnetic data are loaded.")
+        all_times = self._time_array_ns(self.data.times)
+        if len(all_times) < 2:
+            raise ValueError("The loaded file contains too few timestamps.")
+        available_start = self._datetime64_to_datetime(all_times[0])
+        available_end = self._datetime64_to_datetime(all_times[-1])
+        preferred = float(self.SUPERMAG_EQUIVALENT_PADDING_SECONDS)
+        padding_attempts = (preferred, preferred / 2.0, preferred / 4.0, 0.0)
+        errors: list[str] = []
+        for padding_seconds in padding_attempts:
+            padded_start = max(
+                available_start, start - timedelta(seconds=padding_seconds)
+            )
+            padded_end = min(
+                available_end, end + timedelta(seconds=padding_seconds)
+            )
+            try:
+                times, values, cadence, labels, coordinate_name = (
+                    self._prepare_station_timeseries(
+                        station_index, padded_start, padded_end
+                    )
+                )
+                left_padding = max(0.0, (start - padded_start).total_seconds())
+                right_padding = max(0.0, (padded_end - end).total_seconds())
+                padding_note = (
+                    f"input padding: {left_padding/60.0:.1f} min before and "
+                    f"{right_padding/60.0:.1f} min after"
+                )
+                if padding_seconds < preferred:
+                    padding_note += " (reduced because full context was unavailable)"
+                return times, values, cadence, labels, coordinate_name, padding_note
+            except Exception as exc:
+                errors.append(f"{padding_seconds/60.0:.0f}-min padding: {exc}")
+        raise ValueError(
+            "Could not prepare a continuous ULF interval even without extra padding. "
+            + " | ".join(errors[-2:])
+        )
+
+    def _station_ulf_products(
+        self,
+        station_index: int,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        """Calculate the broadband and SuperMAG-comparison ULF products."""
+        if self.data is None:
+            raise ValueError("No magnetic data are loaded.")
+        cache_key = (
+            id(self.data), int(station_index),
+            start.replace(tzinfo=None), end.replace(tzinfo=None),
+        )
+        cached = self._ulf_product_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
+        padded_times, padded_values, cadence, labels, coordinate_name, padding_note = (
+            self._padded_station_ulf_timeseries(station_index, start, end)
+        )
+        start64 = np.datetime64(start.replace(tzinfo=None), "ns")
+        end64 = np.datetime64(end.replace(tzinfo=None), "ns")
+        trim = (padded_times >= start64) & (padded_times <= end64)
+        if np.count_nonzero(trim) < 2:
+            raise ValueError(
+                "The requested plotting interval contains fewer than two ULF samples."
+            )
+
+        # Product 1: the ExploreMag running horizontal broad-band power.
+        broad_filtered, _, broad_note = self._ulf_bandpass_components(
+            padded_values[:, :2], cadence, minimum_period, maximum_period
+        )
+        broad_instantaneous = np.sum(broad_filtered**2, axis=1)
+        averaging_samples = max(3, int(round(10.0 / cadence)))
+        broadband_power = self._rolling_mean(
+            broad_instantaneous, averaging_samples
+        )
+
+        # Product 2: separately filter each conventional Pc band, square the
+        # horizontal components, and sum the four band powers.  A failure here
+        # must not suppress the valid broad-band product.
+        try:
+            butterworth_sum, butterworth_notes = self._separate_pc_butterworth_power(
+                padded_values[:, :2], cadence
+            )
+        except Exception as exc:
+            butterworth_sum = np.full(len(padded_times), np.nan, dtype=float)
+            butterworth_notes = {"error": str(exc)}
+
+        # Product 3: Morlet-integrated Pc2--Pc5.  Again, keep the broad-band
+        # result available when the selected cadence/duration cannot support
+        # the requested wavelet comparison.
+        try:
+            morlet_bands, morlet_total, morlet_note = self._morlet_pc_integrated_powers(
+                padded_values[:, :2], cadence
+            )
+        except Exception as exc:
+            morlet_bands = {
+                name: np.full(len(padded_times), np.nan, dtype=float)
+                for name, _, _ in self.PC_BANDS
+            }
+            morlet_total = np.full(len(padded_times), np.nan, dtype=float)
+            morlet_note = f"Morlet Pc2-Pc5 unavailable: {exc}"
+
+        products: dict[str, Any] = {
+            "times": padded_times[trim],
+            "cadence": cadence,
+            "labels": labels,
+            "coordinate_name": coordinate_name,
+            "broadband_power": np.asarray(broadband_power[trim], dtype=float),
+            "butterworth_pc_sum_power": np.asarray(butterworth_sum[trim], dtype=float),
+            "morlet_total_power": np.asarray(morlet_total[trim], dtype=float),
+            "morlet_band_power": {
+                name: np.asarray(series[trim], dtype=float)
+                for name, series in morlet_bands.items()
+            },
+            "broadband_note": broad_note,
+            "morlet_note": morlet_note,
+            "butterworth_band_notes": butterworth_notes,
+            "padding_note": padding_note,
+        }
+        self._ulf_product_cache[cache_key] = products
+        return products
+
+    @staticmethod
+    def _positive_log10(values: np.ndarray) -> np.ndarray:
+        """Return log10(power), masking zero/non-finite values."""
+        data = np.asarray(values, dtype=float)
+        output = np.full(data.shape, np.nan, dtype=float)
+        valid = np.isfinite(data) & (data > 0.0)
+        output[valid] = np.log10(data[valid])
+        return output
+
     @staticmethod
     def _rolling_mean(values: np.ndarray, samples: int) -> np.ndarray:
         samples = int(max(1, samples))
@@ -4575,6 +4890,18 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
     ) -> None:
         """Add synchronized crosshairs and nearest time/value readout."""
         axes = [axis for axis in axes if axis is not None]
+        previous = getattr(canvas, "_pulsation_cursor_state", None)
+        if previous:
+            for key in ("motion_id", "button_id", "leave_id"):
+                connection_id = previous.get(key)
+                if connection_id is not None:
+                    canvas.mpl_disconnect(connection_id)
+            for artist_group in (previous.get("lines", {}), previous.get("annotations", {})):
+                for artist in artist_group.values():
+                    try:
+                        artist.remove()
+                    except (ValueError, AttributeError):
+                        pass
         scalogram_data = scalogram_data or {}
         # Preserve the established datetime limits.  Creating a cursor line at
         # x=0 (1970-01-01 in Matplotlib date coordinates) can trigger autoscaling
@@ -4673,15 +5000,70 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 annotation.set_text(time_text + " UTC" + ("\n" + "\n".join(readouts) if readouts else ""))
             canvas.draw_idle()
 
+        # Retain the last readout when the pointer moves to the Save button so
+        # the dashed line, time, and values are included in the PNG. Right-click
+        # inside the figure to clear the retained marker.
+        def on_button_press(event) -> None:
+            if getattr(event, "button", None) == 3:
+                hide_cursor()
+
         motion_id = canvas.mpl_connect("motion_notify_event", on_motion)
-        leave_id = canvas.mpl_connect("figure_leave_event", hide_cursor)
+        button_id = canvas.mpl_connect("button_press_event", on_button_press)
         canvas._pulsation_cursor_state = {
             "motion_id": motion_id,
-            "leave_id": leave_id,
+            "button_id": button_id,
             "lines": vertical_lines,
             "annotations": annotations,
-            "callbacks": (on_motion, hide_cursor),
+            "callbacks": (on_motion, on_button_press, hide_cursor),
         }
+
+    @staticmethod
+    def _time_series_axes(figure: Figure) -> list[Any]:
+        """Return axes containing at least one datetime-valued line."""
+        output: list[Any] = []
+        for axis in figure.axes:
+            for line in axis.get_lines():
+                values = np.asarray(line.get_xdata())
+                if values.size and (
+                    np.issubdtype(values.dtype, np.datetime64)
+                    or isinstance(values.flat[0], (datetime, np.datetime64))
+                ):
+                    output.append(axis)
+                    break
+        return output
+
+    @staticmethod
+    def _shared_figure_legend(
+        figure: Figure, axes: list[Any], fontsize: int = 8
+    ) -> bool:
+        """Replace matching subplot legends with one legend below the title."""
+        groups: list[tuple[list[Any], list[str]]] = []
+        for axis in axes:
+            handles, labels = axis.get_legend_handles_labels()
+            visible = [
+                (handle, label) for handle, label in zip(handles, labels)
+                if label and not label.startswith("_") and handle.get_visible()
+            ]
+            if visible:
+                groups.append(
+                    ([item[0] for item in visible], [item[1] for item in visible])
+                )
+        for legend in list(figure.legends):
+            legend.remove()
+        if len(groups) < 2 or any(
+            labels != groups[0][1] for _handles, labels in groups[1:]
+        ):
+            return False
+        for axis in axes:
+            legend = axis.get_legend()
+            if legend is not None:
+                legend.remove()
+        handles, labels = groups[0]
+        figure.legend(
+            handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.91),
+            ncol=min(5, len(labels)), fontsize=fontsize,
+        )
+        return True
 
     @staticmethod
     def _export_time_text(value: np.datetime64 | datetime) -> str:
@@ -4792,21 +5174,378 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         else:
             viewer.messagebox.showinfo(f"{token} export", message)
 
+    @staticmethod
+    def _coerce_reference_time_series(values: np.ndarray, ntime: int, label: str) -> np.ndarray:
+        """Coerce one official-reference variable to a 1-D time series."""
+        array = np.asarray(np.ma.filled(values, np.nan), dtype=float)
+        array = np.squeeze(array)
+        if array.ndim == 1 and array.size == ntime:
+            return array
+        if array.ndim >= 2:
+            matching_axes = [axis for axis, size in enumerate(array.shape) if size == ntime]
+            if len(matching_axes) == 1:
+                array = np.moveaxis(array, matching_axes[0], 0)
+                trailing = int(np.prod(array.shape[1:]))
+                if trailing == 1:
+                    return array.reshape(ntime)
+        raise ValueError(
+            f"{label} could not be reduced to one value per timestamp; "
+            f"shape={array.shape}, expected time length={ntime}."
+        )
+
+    @staticmethod
+    def _detect_ipow_log_base(metadata_text: str) -> Optional[float]:
+        """Return 10 or e only when a NetCDF attribute states the base."""
+        text = str(metadata_text).lower()
+        if "log10" in text or "base 10" in text or "base-10" in text:
+            return 10.0
+        if "natural log" in text or "natural logarithm" in text or "loge" in text:
+            return float(np.e)
+        return None
+
+    def _read_official_supermag_ulf_file(self, filename: str) -> dict[str, Any]:
+        """Read Pc2--Pc5 IPOW from an official SuperMAG ULF NetCDF file.
+
+        SuperMAG distributes the derived ULF product as NetCDF, but files from
+        different download epochs can use either one IPOW array with a four-band
+        dimension or separate band variables.  This reader accepts both forms.
+        It deliberately does not guess the logarithm base when the file metadata
+        does not state it; the import dialog asks the user in that case.
+        """
+        path = Path(filename).expanduser().resolve()
+        with viewer.Dataset(str(path), "r") as dataset:
+            variables = dataset.variables
+            if not variables:
+                raise ValueError("The NetCDF file contains no variables.")
+
+            def normalized(name: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+            # Time variable: prefer standard names, otherwise a 1-D variable
+            # carrying CF-style time units.
+            time_name = None
+            for candidate in ("time", "tval", "epoch", "datetime", "utc"):
+                for name in variables:
+                    if normalized(name) == candidate:
+                        time_name = name
+                        break
+                if time_name is not None:
+                    break
+            if time_name is None:
+                for name, variable in variables.items():
+                    units = str(getattr(variable, "units", "")).lower()
+                    if getattr(variable, "ndim", 0) == 1 and " since " in units:
+                        time_name = name
+                        break
+            if time_name is None:
+                raise ValueError(
+                    "Could not identify the time variable in the SuperMAG ULF NetCDF file."
+                )
+
+            time_variable = variables[time_name]
+            try:
+                if hasattr(time_variable, "units"):
+                    datetimes = viewer.netcdf_time_to_datetimes(time_variable)
+                else:
+                    raw_time = np.asarray(np.ma.filled(time_variable[:], np.nan))
+                    numeric = np.asarray(raw_time, dtype=float).reshape(-1)
+                    finite = numeric[np.isfinite(numeric)]
+                    if not len(finite) or float(np.nanmedian(np.abs(finite))) < 1.0e8:
+                        raise ValueError("numeric timestamps do not look like Unix seconds")
+                    datetimes = np.asarray(
+                        [viewer.unix_seconds_to_datetime(value) for value in numeric],
+                        dtype=object,
+                    )
+            except Exception as exc:
+                raise ValueError(f"Could not decode {time_name!r} as UTC time: {exc}") from exc
+            times = np.asarray(datetimes, dtype="datetime64[ns]")
+            ntime = len(times)
+            if ntime < 2:
+                raise ValueError("The official ULF reference contains fewer than two timestamps.")
+
+            band_logs: dict[str, np.ndarray] = {}
+            used_variable_names: list[str] = []
+            for band_name, _, _ in self.PC_BANDS:
+                token = band_name.lower()
+                matches = [
+                    name for name in variables
+                    if token in normalized(name)
+                    and ("ipow" in normalized(name) or "integratedpower" in normalized(name))
+                ]
+                if matches:
+                    name = matches[0]
+                    band_logs[band_name] = self._coerce_reference_time_series(
+                        variables[name][:], ntime, name
+                    )
+                    used_variable_names.append(name)
+
+            if len(band_logs) != len(self.PC_BANDS):
+                grouped_name = next(
+                    (
+                        name for name in variables
+                        if normalized(name) in {"ipow", "integratedpower", "integratedulfpower"}
+                    ),
+                    None,
+                )
+                if grouped_name is not None:
+                    grouped = np.asarray(
+                        np.ma.filled(variables[grouped_name][:], np.nan), dtype=float
+                    )
+                    grouped = np.squeeze(grouped)
+                    if grouped.ndim != 2:
+                        raise ValueError(
+                            f"{grouped_name} has shape {grouped.shape}; expected a "
+                            "time-by-band or band-by-time array after singleton dimensions are removed."
+                        )
+                    if grouped.shape[0] == ntime and grouped.shape[1] >= 4:
+                        time_by_band = grouped
+                    elif grouped.shape[1] == ntime and grouped.shape[0] >= 4:
+                        time_by_band = grouped.T
+                    else:
+                        raise ValueError(
+                            f"{grouped_name} shape {grouped.shape} does not contain "
+                            f"the decoded time length {ntime} and four Pc bands."
+                        )
+                    band_logs = {
+                        band_name: np.asarray(time_by_band[:, column], dtype=float)
+                        for column, (band_name, _, _) in enumerate(self.PC_BANDS)
+                    }
+                    used_variable_names = [grouped_name]
+
+            missing = [name for name, _, _ in self.PC_BANDS if name not in band_logs]
+            if missing:
+                raise ValueError(
+                    "Could not locate official IPOW for " + ", ".join(missing)
+                    + ". Available variables: " + ", ".join(variables.keys())
+                )
+
+            metadata_parts: list[str] = []
+            for attr in dataset.ncattrs():
+                try:
+                    metadata_parts.append(f"{attr}={dataset.getncattr(attr)}")
+                except Exception:
+                    pass
+            for name in used_variable_names:
+                variable = variables[name]
+                for attr in variable.ncattrs():
+                    try:
+                        metadata_parts.append(f"{name}.{attr}={variable.getncattr(attr)}")
+                    except Exception:
+                        pass
+            detected_base = self._detect_ipow_log_base(" | ".join(metadata_parts))
+
+            station_code = ""
+            for attr in (
+                "station", "station_code", "iaga", "IAGA", "site", "site_code",
+                "station_id", "Station", "STATION",
+            ):
+                if attr in dataset.ncattrs():
+                    value = dataset.getncattr(attr)
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", errors="replace")
+                    text = str(value).strip()
+                    if text:
+                        station_code = text.upper()
+                        break
+
+        return {
+            "path": str(path),
+            "times": times,
+            "band_log": band_logs,
+            "station_code": station_code,
+            "detected_log_base": detected_base,
+        }
+
+    @staticmethod
+    def _convert_official_ipow_reference(
+        raw_reference: dict[str, Any], log_base: float
+    ) -> dict[str, Any]:
+        """Convert official per-band IPOW out of log space, then sum bands."""
+        base = float(log_base)
+        if not (np.isclose(base, 10.0) or np.isclose(base, np.e)):
+            raise ValueError("Official IPOW log base must be e or 10.")
+        band_linear: dict[str, np.ndarray] = {}
+        for name, log_values in raw_reference["band_log"].items():
+            values = np.asarray(log_values, dtype=float)
+            if np.isclose(base, 10.0):
+                linear = np.power(10.0, values)
+            else:
+                linear = np.exp(values)
+            linear[~np.isfinite(values)] = np.nan
+            band_linear[name] = linear
+        stack = np.vstack([band_linear[name] for name in ("Pc2", "Pc3", "Pc4", "Pc5")])
+        count = np.sum(np.isfinite(stack), axis=0)
+        total_linear = np.nansum(stack, axis=0)
+        total_linear[count == 0] = np.nan
+        reference = dict(raw_reference)
+        reference["log_base"] = base
+        reference["band_linear"] = band_linear
+        reference["total_linear"] = total_linear
+        reference["total_log10"] = ExploreMagAnalyzer._positive_log10(total_linear)
+        return reference
+
+    def _official_supermag_reference_for_station(
+        self, station_code: str
+    ) -> Optional[dict[str, Any]]:
+        code = str(station_code).strip().upper()
+        candidates = [code]
+        alias = self.SUPERMAG_ULF_STATION_ALIASES.get(code)
+        if alias:
+            candidates.append(alias.upper())
+        for candidate in candidates:
+            reference = self._supermag_ulf_reference.get(candidate)
+            if reference is not None:
+                return reference
+        # Also permit a loaded official code to map back to the ExploreMag code.
+        for key, reference in self._supermag_ulf_reference.items():
+            if self.SUPERMAG_ULF_STATION_ALIASES.get(str(key).upper(), "").upper() == code:
+                return reference
+        return None
+
+    @staticmethod
+    def _interpolate_reference_to_times(
+        reference_times: np.ndarray,
+        reference_values: np.ndarray,
+        target_times: np.ndarray,
+    ) -> np.ndarray:
+        """Interpolate an official reference onto target timestamps inside coverage."""
+        source_t = np.asarray(reference_times, dtype="datetime64[ns]").astype(np.int64) / 1.0e9
+        target_t = np.asarray(target_times, dtype="datetime64[ns]").astype(np.int64) / 1.0e9
+        source_y = np.asarray(reference_values, dtype=float)
+        finite = np.isfinite(source_t) & np.isfinite(source_y)
+        output = np.full(len(target_t), np.nan, dtype=float)
+        if np.count_nonzero(finite) < 2:
+            return output
+        source_t = source_t[finite]
+        source_y = source_y[finite]
+        order = np.argsort(source_t)
+        source_t = source_t[order]
+        source_y = source_y[order]
+        inside = (target_t >= source_t[0]) & (target_t <= source_t[-1])
+        output[inside] = np.interp(target_t[inside], source_t, source_y)
+        return output
+
+    def _load_official_supermag_ulf_reference_dialog(
+        self,
+        parent,
+        station_indices: list[int],
+    ) -> int:
+        """Load one or more official SuperMAG ULF NetCDF files for comparison."""
+        if self.data is None:
+            return 0
+        filenames = viewer.filedialog.askopenfilenames(
+            parent=parent,
+            title="Select official SuperMAG ULF NetCDF file(s)",
+            filetypes=[("NetCDF", "*.nc *.nc4 *.netcdf"), ("All files", "*.*")],
+        )
+        if not filenames:
+            return 0
+
+        loaded_codes = [
+            str(self.data.station_codes[int(index)]).strip().upper()
+            for index in station_indices
+        ]
+        imported = 0
+        failures: list[str] = []
+        for filename in filenames:
+            try:
+                raw = self._read_official_supermag_ulf_file(filename)
+                base = raw.get("detected_log_base")
+                if base is None:
+                    response = simpledialog.askstring(
+                        "Official SuperMAG IPOW log base",
+                        "SuperMAG documents IPOW as 'Log (nT²)', but this file does not "
+                        "state the logarithm base in its metadata. Enter 'e' for natural "
+                        "logarithm or '10' for base-10 logarithm:",
+                        initialvalue="e",
+                        parent=parent,
+                    )
+                    if response is None:
+                        continue
+                    token = response.strip().lower()
+                    if token in {"e", "ln", "natural", "loge"}:
+                        base = float(np.e)
+                    elif token in {"10", "log10", "base10", "base-10"}:
+                        base = 10.0
+                    else:
+                        raise ValueError("Log base must be entered as e or 10.")
+                reference = self._convert_official_ipow_reference(raw, float(base))
+
+                file_code = str(reference.get("station_code", "")).strip().upper()
+                associated_code = ""
+                possible = {file_code}
+                if file_code:
+                    possible.add(self.SUPERMAG_ULF_STATION_ALIASES.get(file_code, "").upper())
+                for code in loaded_codes:
+                    alias = self.SUPERMAG_ULF_STATION_ALIASES.get(code, "").upper()
+                    if code in possible or alias in possible:
+                        associated_code = code
+                        break
+                if not associated_code:
+                    normalized_filename = re.sub(
+                        r"[^A-Z0-9]+", "", Path(filename).stem.upper()
+                    )
+                    for code in loaded_codes:
+                        alias = self.SUPERMAG_ULF_STATION_ALIASES.get(code, "").upper()
+                        if re.sub(r"[^A-Z0-9]+", "", code) in normalized_filename or (
+                            alias and re.sub(r"[^A-Z0-9]+", "", alias) in normalized_filename
+                        ):
+                            associated_code = code
+                            break
+                if not associated_code and len(loaded_codes) == 1:
+                    associated_code = loaded_codes[0]
+                if not associated_code:
+                    response = simpledialog.askstring(
+                        "Associate SuperMAG ULF reference",
+                        "Enter the ExploreMag station code for this file.\n\n"
+                        f"File: {Path(filename).name}\n"
+                        f"Station reported by file: {file_code or 'not specified'}\n"
+                        f"Current plotted stations: {', '.join(loaded_codes)}",
+                        initialvalue=file_code,
+                        parent=parent,
+                    )
+                    if response is None or not response.strip():
+                        continue
+                    associated_code = response.strip().upper()
+
+                reference["associated_station_code"] = associated_code
+                self._supermag_ulf_reference[associated_code] = reference
+                if file_code:
+                    self._supermag_ulf_reference[file_code] = reference
+                imported += 1
+            except Exception as exc:
+                failures.append(f"{Path(filename).name}: {exc}")
+
+        if failures:
+            viewer.messagebox.showwarning(
+                "Official SuperMAG ULF reference",
+                f"Loaded {imported} file(s).\n\nCould not load:\n" + "\n\n".join(failures[:8]),
+                parent=parent,
+            )
+        elif imported:
+            viewer.messagebox.showinfo(
+                "Official SuperMAG ULF reference",
+                f"Loaded {imported} official SuperMAG ULF reference file(s).",
+                parent=parent,
+            )
+        return imported
+
     def _export_multi_station_ulf_data(
         self,
         station_indices: list[int],
         start: datetime,
         end: datetime,
     ) -> None:
+        """Export all local ULF comparison products plus any loaded official reference."""
         if self.data is None or not station_indices:
             return
         default_name = (
-            "supermag_multi_station_ULF_power_"
+            "exploremag_multi_station_ULF_comparison_"
             f"{start:%Y%m%d_%H%M%S}_{end:%Y%m%d_%H%M%S}.csv"
         )
         filename = viewer.filedialog.asksaveasfilename(
             parent=self.root,
-            title="Export multi-station ULF wave power",
+            title="Export multi-station ULF comparison",
             defaultextension=".csv",
             initialfile=default_name,
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -4814,35 +5553,74 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         if not filename:
             return
 
-        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
-        failures = []
+        failures: list[str] = []
         row_count = 0
         with open(filename, "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(
                 [
-                    "station",
-                    "time_utc",
-                    "ULF_power_nT2",
-                    "minimum_period_s",
-                    "maximum_period_s",
+                    "station", "time_utc",
+                    "broadband_5_600_power_nT2",
+                    "butterworth_pc2_pc5_sum_power_nT2",
+                    "morlet_pc2_pc5_power_nT2", "morlet_pc2_pc5_log10_nT2",
+                    "morlet_pc2_power_nT2", "morlet_pc3_power_nT2",
+                    "morlet_pc4_power_nT2", "morlet_pc5_power_nT2",
+                    "official_supermag_pc2_pc5_sum_power_nT2",
+                    "official_supermag_pc2_pc5_sum_log10_nT2",
+                    "official_supermag_pc2_power_nT2", "official_supermag_pc3_power_nT2",
+                    "official_supermag_pc4_power_nT2", "official_supermag_pc5_power_nT2",
+                    "official_ipow_log_base", "input_padding_note",
                 ]
             )
             for station_index in station_indices:
                 code = str(self.data.station_codes[int(station_index)])
                 try:
-                    times, wave_power, _, _, band_note = self._station_ulf_power_series(
-                        station_index, start, end
-                    )
-                    effective_minimum = float(band_note.split("–", 1)[0])
-                    for sample_time, value in zip(times, wave_power):
+                    products = self._station_ulf_products(station_index, start, end)
+                    times = np.asarray(products["times"])
+                    morlet_total = np.asarray(products["morlet_total_power"], dtype=float)
+                    morlet_log10 = self._positive_log10(morlet_total)
+                    reference = self._official_supermag_reference_for_station(code)
+                    official_total = np.full(len(times), np.nan, dtype=float)
+                    official_log10 = np.full(len(times), np.nan, dtype=float)
+                    official_bands = {
+                        name: np.full(len(times), np.nan, dtype=float)
+                        for name, _, _ in self.PC_BANDS
+                    }
+                    official_base = ""
+                    if reference is not None:
+                        official_total = self._interpolate_reference_to_times(
+                            reference["times"], reference["total_linear"], times
+                        )
+                        official_log10 = self._positive_log10(official_total)
+                        for name, _, _ in self.PC_BANDS:
+                            official_bands[name] = self._interpolate_reference_to_times(
+                                reference["times"], reference["band_linear"][name], times
+                            )
+                        official_base = (
+                            "10" if np.isclose(float(reference["log_base"]), 10.0) else "e"
+                        )
+
+                    for sample in range(len(times)):
                         writer.writerow(
                             [
                                 code,
-                                self._export_time_text(sample_time),
-                                f"{float(value):.10g}",
-                                f"{effective_minimum:g}",
-                                f"{maximum_period:g}",
+                                self._export_time_text(times[sample]),
+                                f"{float(products['broadband_power'][sample]):.10g}",
+                                f"{float(products['butterworth_pc_sum_power'][sample]):.10g}",
+                                f"{float(morlet_total[sample]):.10g}",
+                                f"{float(morlet_log10[sample]):.10g}",
+                                f"{float(products['morlet_band_power']['Pc2'][sample]):.10g}",
+                                f"{float(products['morlet_band_power']['Pc3'][sample]):.10g}",
+                                f"{float(products['morlet_band_power']['Pc4'][sample]):.10g}",
+                                f"{float(products['morlet_band_power']['Pc5'][sample]):.10g}",
+                                f"{float(official_total[sample]):.10g}",
+                                f"{float(official_log10[sample]):.10g}",
+                                f"{float(official_bands['Pc2'][sample]):.10g}",
+                                f"{float(official_bands['Pc3'][sample]):.10g}",
+                                f"{float(official_bands['Pc4'][sample]):.10g}",
+                                f"{float(official_bands['Pc5'][sample]):.10g}",
+                                official_base,
+                                products["padding_note"],
                             ]
                         )
                         row_count += 1
@@ -4914,6 +5692,9 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         container.pack(fill=viewer.tk.BOTH, expand=True)
         canvas = FigureCanvasTkAgg(figure, master=container)
 
+        if self._shared_figure_legend(figure, list(figure.axes)):
+            figure.subplots_adjust(top=0.84)
+
         def refresh_legends() -> None:
             for axis in figure.axes:
                 visible_lines = [
@@ -4934,6 +5715,7 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                     )
                 elif legend is not None:
                     legend.remove()
+            self._shared_figure_legend(figure, list(figure.axes))
 
         if component_artists:
             visibility = {name: True for name in component_artists}
@@ -4966,6 +5748,8 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         toolbar = NavigationToolbar2Tk(canvas, container, pack_toolbar=False)
         toolbar.update()
         toolbar.pack(fill=viewer.tk.X)
+        if cursor_axes is None:
+            cursor_axes = self._time_series_axes(figure)
         if cursor_axes:
             self._attach_time_value_cursor(
                 canvas,
@@ -5067,7 +5851,10 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                     f"{self._format_gui_time(end)} UTC",
                     fontsize=13,
                 )
-                figure.tight_layout(rect=(0, 0, 1, 0.96))
+                has_global_legend = self._shared_figure_legend(figure, axes)
+                figure.tight_layout(
+                    rect=(0, 0, 1, 0.86 if has_global_legend else 0.96)
+                )
                 self._new_figure_window(
                     f"Wavelet scalograms — {code}",
                     figure,
@@ -5193,7 +5980,10 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                     f"{self._format_gui_time(end)} UTC",
                     fontsize=13,
                 )
-                figure.tight_layout(rect=(0, 0, 1, 0.96))
+                has_global_legend = self._shared_figure_legend(figure, axes)
+                figure.tight_layout(
+                    rect=(0, 0, 1, 0.86 if has_global_legend else 0.96)
+                )
                 self._new_figure_window(
                     f"Pi pulsation analysis — {code}",
                     figure,
@@ -5366,12 +6156,19 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 "Some PC analyses failed", "\n\n".join(failures[:10])
             )
 
-    def show_total_ulf_wave_power_map(self) -> None:
+    def show_total_ulf_wave_power_map(
+        self,
+        method: str = ULF_METHOD_BROADBAND,
+    ) -> None:
+        """Map either broadband 5--600 s power or the Morlet Pc2--Pc5 sum."""
         if self.data is None:
             viewer.messagebox.showinfo(
-                "Total ULF wave power", "Open or download a magnetic data file first."
+                "ULF bandpass power", "Open or download a magnetic data file first."
             )
             return
+        method = str(method).strip().lower()
+        if method not in {self.ULF_METHOD_BROADBAND, self.ULF_METHOD_MORLET}:
+            method = self.ULF_METHOD_BROADBAND
         selected = [
             int(index)
             for index in sorted(self.selected_station_indices)
@@ -5380,81 +6177,128 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         ]
         if not selected:
             viewer.messagebox.showinfo(
-                "Total ULF wave power",
+                "ULF bandpass power",
                 "Select one or more stations first. Use Select all stations to analyze every station.",
             )
             return
         if not self._confirm_small_region_map_analysis(
-            "Total ULF wave power", selected
+            "ULF bandpass power", selected
         ):
-            self.pi2_status_var.set("Total ULF wave-power analysis cancelled.")
+            self.pi2_status_var.set("ULF bandpass power analysis cancelled.")
             return
         try:
             start, end = self._plot_interval()
             self._require_scipy()
         except (ValueError, RuntimeError) as exc:
-            viewer.messagebox.showerror("Total ULF wave power", str(exc))
+            viewer.messagebox.showerror("ULF bandpass power", str(exc))
             return
 
-        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
-        valid_indices = []
-        powers = []
-        resolved_band_notes = []
-        failures = []
+        valid_indices: list[int] = []
+        map_values: list[float] = []
+        method_notes: list[str] = []
+        failures: list[str] = []
         station_count = len(selected)
         for number, station_index in enumerate(selected, start=1):
             code = str(self.data.station_codes[station_index])
+            method_label = (
+                "Morlet Pc2-Pc5"
+                if method == self.ULF_METHOD_MORLET
+                else "5-600 s bandpass"
+            )
             self.pi2_status_var.set(
-                f"Computing total ULF power for {code} ({number}/{station_count})…"
+                f"Computing {method_label} power for {code} ({number}/{station_count})…"
             )
             self.root.update_idletasks()
             try:
-                _, values, cadence, _, _ = self._prepare_station_timeseries(
-                    station_index, start, end
-                )
-                filtered, _, band_note = self._ulf_bandpass_components(
-                    values, cadence, minimum_period, maximum_period
-                )
-                mean_power = float(np.nanmean(np.sum(filtered ** 2, axis=1)))
-                if np.isfinite(mean_power) and mean_power > 0.0:
+                products = self._station_ulf_products(station_index, start, end)
+                if method == self.ULF_METHOD_MORLET:
+                    linear_series = np.asarray(
+                        products["morlet_total_power"], dtype=float
+                    )
+                    mean_linear = float(np.nanmean(linear_series))
+                    mean_power = (
+                        float(np.log10(mean_linear))
+                        if np.isfinite(mean_linear) and mean_linear > 0.0
+                        else np.nan
+                    )
+                    note = str(products["morlet_note"])
+                else:
+                    series = np.asarray(products["broadband_power"], dtype=float)
+                    mean_power = float(np.nanmean(series))
+                    note = str(products["broadband_note"])
+                if np.isfinite(mean_power):
+                    if method == self.ULF_METHOD_BROADBAND and mean_power <= 0.0:
+                        continue
                     valid_indices.append(station_index)
-                    powers.append(mean_power)
-                    resolved_band_notes.append(band_note)
+                    map_values.append(mean_power)
+                    method_notes.append(note)
             except Exception as exc:
                 failures.append(f"{code}: {exc}")
 
         if not valid_indices:
-            self.pi2_status_var.set("Total ULF wave-power calculation failed.")
+            self.pi2_status_var.set("ULF bandpass power calculation failed.")
             viewer.messagebox.showerror(
-                "Total ULF wave power",
+                "ULF bandpass power",
                 "No station produced finite wave power.\n\n"
                 + "\n\n".join(failures[:8]),
             )
             return
 
-        power_values = np.asarray(powers, dtype=float)
+        display_values = np.asarray(map_values, dtype=float)
         lats = np.asarray(self.data.glat[valid_indices], dtype=float)
-        lons = np.asarray(viewer.normalize_longitude(self.data.glon[valid_indices]), dtype=float)
+        lons = np.asarray(
+            viewer.normalize_longitude(self.data.glon[valid_indices]), dtype=float
+        )
         center_lon, relative_lons, _ = viewer.choose_longitude_window(lons)
 
-        low = float(np.nanpercentile(power_values, 5.0))
-        high = float(np.nanpercentile(power_values, 95.0))
-        if not np.isfinite(low) or low <= 0.0:
-            low = float(np.nanmin(power_values[power_values > 0.0]))
-        if not np.isfinite(high) or high <= low:
-            high = float(np.nanmax(power_values))
-        if high <= low:
-            high = low * 1.001
-        normalized = np.clip(
-            (np.log10(power_values) - np.log10(low))
-            / max(np.log10(high) - np.log10(low), 1.0e-12),
-            0.0,
-            1.0,
-        )
+        if method == self.ULF_METHOD_MORLET:
+            low = float(np.nanpercentile(display_values, 5.0))
+            high = float(np.nanpercentile(display_values, 95.0))
+            if not np.isfinite(low):
+                low = float(np.nanmin(display_values))
+            if not np.isfinite(high) or high <= low:
+                high = float(np.nanmax(display_values))
+            if high <= low:
+                high = low + 1.0e-6
+            norm = mpl.colors.Normalize(vmin=low, vmax=high)
+            normalized = np.clip((display_values - low) / (high - low), 0.0, 1.0)
+            colorbar_label = (
+                "Mean Morlet-integrated Pc2-Pc5 power [log10(nT²)]"
+            )
+            map_title = (
+                "ULF Morlet-integrated wave power as in SuperMAG "
+                "Pc2 + Pc3 + Pc4 + Pc5 (log10 power)"
+            )
+            window_title = "ULF power map from Morlet-integrated wave power as in SuperMAG "
+            default_png = "mag_supermag_method_equivalent_ulf_power_map.png"
+        else:
+            positive = display_values[np.isfinite(display_values) & (display_values > 0.0)]
+            low = float(np.nanpercentile(positive, 5.0))
+            high = float(np.nanpercentile(positive, 95.0))
+            if not np.isfinite(low) or low <= 0.0:
+                low = float(np.nanmin(positive))
+            if not np.isfinite(high) or high <= low:
+                high = float(np.nanmax(positive))
+            if high <= low:
+                high = low * 1.001
+            norm = LogNorm(vmin=low, vmax=high)
+            normalized = np.clip(
+                (np.log10(display_values) - np.log10(low))
+                / max(np.log10(high) - np.log10(low), 1.0e-12),
+                0.0,
+                1.0,
+            )
+            colorbar_label = (
+                "Mean horizontal 5-600 s bandpass power (nT²; logarithmic scale)"
+            )
+            map_title = "Horizontal bandpass power over 5–600 s"
+            window_title = "Horizontal bandpass power over 5–600 s"
+            default_png = "mag_horizontal_bandpass_power_5_600s_map.png"
+
         bubble_sizes = 45.0 + 360.0 * np.sqrt(normalized)
 
         window = viewer.tk.Toplevel(self.root)
-        window.title("Total ULF wave power map")
+        window.title(window_title)
         window.geometry("1250x820")
         window.minsize(900, 620)
         self._plot_windows.append(window)
@@ -5464,10 +6308,7 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         selection_status = viewer.tk.StringVar(
             value="No map stations selected. Left-click bubbles to select; double-click for station detail."
         )
-        viewer.ttk.Label(
-            top,
-            textvariable=selection_status,
-        ).pack(side=viewer.tk.LEFT)
+        viewer.ttk.Label(top, textvariable=selection_status).pack(side=viewer.tk.LEFT)
 
         figure = Figure(figsize=(12, 7.5), dpi=100)
         if viewer.HAS_CARTOPY:
@@ -5479,11 +6320,8 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             axis.add_feature(viewer.cfeature.BORDERS, linewidth=0.5, linestyle=":")
             axis.add_feature(viewer.cfeature.LAKES, alpha=0.45)
             grid = axis.gridlines(
-                crs=viewer.ccrs.PlateCarree(),
-                draw_labels=True,
-                linewidth=0.45,
-                alpha=0.45,
-                linestyle="--",
+                crs=viewer.ccrs.PlateCarree(), draw_labels=True,
+                linewidth=0.45, alpha=0.45, linestyle="--",
             )
             grid.top_labels = False
             grid.right_labels = False
@@ -5493,85 +6331,48 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             lat_max = float(np.nanmax(lats))
             axis.set_extent(
                 [
-                    max(-180.0, rel_min - 6.0),
-                    min(180.0, rel_max + 6.0),
-                    max(-90.0, lat_min - 4.0),
-                    min(90.0, lat_max + 4.0),
+                    max(-180.0, rel_min - 6.0), min(180.0, rel_max + 6.0),
+                    max(-90.0, lat_min - 4.0), min(90.0, lat_max + 4.0),
                 ],
                 crs=projection,
             )
             scatter = axis.scatter(
-                lons,
-                lats,
-                s=bubble_sizes,
-                c=power_values,
-                cmap="viridis",
-                norm=LogNorm(vmin=low, vmax=high),
-                edgecolors="black",
-                linewidths=0.7,
-                alpha=0.85,
-                picker=7,
-                transform=viewer.ccrs.PlateCarree(),
-                zorder=12,
+                lons, lats, s=bubble_sizes, c=display_values,
+                cmap="viridis", norm=norm, edgecolors="black", linewidths=0.7,
+                alpha=0.85, picker=7, transform=viewer.ccrs.PlateCarree(), zorder=12,
             )
             selected_scatter = axis.scatter(
-                [],
-                [],
-                s=125,
-                c="red",
-                marker="x",
-                linewidths=2.0,
-                transform=viewer.ccrs.PlateCarree(),
-                zorder=20,
+                [], [], s=125, c="red", marker="x", linewidths=2.0,
+                transform=viewer.ccrs.PlateCarree(), zorder=20,
             )
             selection_x = lons
         else:
             axis = figure.add_subplot(111)
             scatter = axis.scatter(
-                relative_lons,
-                lats,
-                s=bubble_sizes,
-                c=power_values,
-                cmap="viridis",
-                norm=LogNorm(vmin=low, vmax=high),
-                edgecolors="black",
-                linewidths=0.7,
-                alpha=0.85,
-                picker=7,
-                zorder=12,
+                relative_lons, lats, s=bubble_sizes, c=display_values,
+                cmap="viridis", norm=norm, edgecolors="black", linewidths=0.7,
+                alpha=0.85, picker=7, zorder=12,
             )
             selected_scatter = axis.scatter(
-                [],
-                [],
-                s=125,
-                c="red",
-                marker="x",
-                linewidths=2.0,
-                zorder=20,
+                [], [], s=125, c="red", marker="x", linewidths=2.0, zorder=20
             )
             selection_x = relative_lons
             axis.set_xlabel(f"Longitude relative to {center_lon:.1f}°")
             axis.set_ylabel("Geographic latitude")
             axis.grid(True, alpha=0.3)
-            axis.set_xlim(float(np.nanmin(relative_lons)) - 5.0, float(np.nanmax(relative_lons)) + 5.0)
+            axis.set_xlim(
+                float(np.nanmin(relative_lons)) - 5.0,
+                float(np.nanmax(relative_lons)) + 5.0,
+            )
             axis.set_ylim(float(np.nanmin(lats)) - 4.0, float(np.nanmax(lats)) + 4.0)
 
-        unique_band_notes = list(dict.fromkeys(resolved_band_notes))
-        band_display = (
-            unique_band_notes[0]
-            if len(unique_band_notes) == 1
-            else "station cadence-dependent bands: " + "; ".join(unique_band_notes)
-        )
+        unique_notes = list(dict.fromkeys(method_notes))
+        note_display = unique_notes[0] if len(unique_notes) == 1 else "station-dependent resolved bands"
         axis.set_title(
-            f"Total horizontal ULF wave power ({band_display})\n"
+            f"{map_title}\n"
             f"{self._format_gui_time(start)} to {self._format_gui_time(end)} UTC"
         )
-        figure.colorbar(
-            scatter,
-            ax=axis,
-            pad=0.02,
-            label="Mean horizontal ULF wave power (nT²; logarithmic scale)",
-        )
+        figure.colorbar(scatter, ax=axis, pad=0.02, label=colorbar_label)
         figure.tight_layout()
 
         selected_local_indices: set[int] = set()
@@ -5602,31 +6403,24 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                     "Select one or more station bubbles on the map first.",
                 )
                 return
-            station_indices = [
-                valid_indices[index] for index in sorted(selected_local_indices)
-            ]
-            self.plot_multi_station_ulf_power(station_indices, start, end)
+            station_indices = [valid_indices[index] for index in sorted(selected_local_indices)]
+            self.plot_multi_station_ulf_power(
+                station_indices, start, end, initial_method=method
+            )
 
         def clear_map_selection() -> None:
             selected_local_indices.clear()
             update_map_selection()
 
-        # Packed first on the RIGHT so it appears immediately to the right of
-        # the time-series button that is packed next.
         viewer.ttk.Button(
-            top,
-            text="Remove selection",
-            command=clear_map_selection,
+            top, text="Remove selection", command=clear_map_selection
         ).pack(side=viewer.tk.RIGHT, padx=(5, 0))
         viewer.ttk.Button(
-            top,
-            text="Plot multi-station time series",
-            command=plot_selected_map_stations,
+            top, text="Plot multi-station time series", command=plot_selected_map_stations
         ).pack(side=viewer.tk.RIGHT, padx=(5, 0))
         viewer.ttk.Button(
-            top,
-            text="Save map PNG…",
-            command=lambda: self.save_figure_png(figure, "mag_total_ulf_wave_power_map.png"),
+            top, text="Save map PNG…",
+            command=lambda: self.save_figure_png(figure, default_png),
         ).pack(side=viewer.tk.RIGHT)
 
         container = viewer.ttk.Frame(window)
@@ -5645,7 +6439,9 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             if not 0 <= local_index < len(valid_indices):
                 return
             if getattr(event.mouseevent, "dblclick", False):
-                self.open_station_ulf_power_figure(valid_indices[local_index], start, end)
+                self.open_station_ulf_power_figure(
+                    valid_indices[local_index], start, end, initial_method=method
+                )
                 return
             if local_index in selected_local_indices:
                 selected_local_indices.remove(local_index)
@@ -5657,7 +6453,7 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
 
         status = (
             f"Computed {len(valid_indices)} station(s); {len(failures)} failed or lacked "
-            f"resolvable data. Band(s) used: {band_display}."
+            f"resolvable data. {note_display}."
         )
         viewer.ttk.Label(window, text=status, padding=4).pack(fill=viewer.tk.X)
         self.pi2_status_var.set(status)
@@ -5676,41 +6472,50 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         station_index: int,
         start: datetime,
         end: datetime,
+        method: str = ULF_METHOD_BROADBAND,
     ) -> tuple[np.ndarray, np.ndarray, tuple[str, str], str, str]:
-        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
-        times, values, cadence, labels, coordinate_name = (
-            self._prepare_station_timeseries(station_index, start, end)
+        """Return the selected ULF time series without changing its units.
+
+        Broadband mode returns the running 5--600 s Butterworth-bandpass power.
+        Morlet mode returns the scale-integrated Pc2+Pc3+Pc4+Pc5 power.  Log
+        display is handled by the plotting layer so exports retain linear nT^2.
+        """
+        products = self._station_ulf_products(station_index, start, end)
+        selected_method = str(method).strip().lower()
+        if selected_method == self.ULF_METHOD_MORLET:
+            series = np.asarray(products["morlet_total_power"], dtype=float)
+            note = str(products["morlet_note"])
+        else:
+            series = np.asarray(products["broadband_power"], dtype=float)
+            note = str(products["broadband_note"])
+        return (
+            np.asarray(products["times"]),
+            series,
+            tuple(products["labels"]),
+            str(products["coordinate_name"]),
+            note,
         )
-        filtered, _, band_note = self._ulf_bandpass_components(
-            values, cadence, minimum_period, maximum_period
-        )
-        instantaneous_power = np.sum(filtered ** 2, axis=1)
-        averaging_samples = max(3, int(round(10.0 / cadence)))
-        wave_power = self._rolling_mean(instantaneous_power, averaging_samples)
-        return times, wave_power, labels, coordinate_name, band_note
 
     def plot_multi_station_ulf_power(
         self,
         station_indices: list[int],
         start: datetime,
         end: datetime,
+        initial_method: str = ULF_METHOD_BROADBAND,
     ) -> None:
-        """Plot stacked station ULF power with editable time and y-axis limits."""
+        """Plot selectable broadband or Morlet Pc2--Pc5 station power series."""
         if self.data is None or not station_indices:
             return
+        initial_method = str(initial_method).strip().lower()
+        if initial_method not in {self.ULF_METHOD_BROADBAND, self.ULF_METHOD_MORLET}:
+            initial_method = self.ULF_METHOD_BROADBAND
 
         figure = Figure(
-            figsize=(14, max(6.0, 2.25 * len(station_indices) + 1.0)),
-            dpi=100,
+            figsize=(14, max(6.0, 2.25 * len(station_indices) + 1.0)), dpi=100
         )
         axes = [figure.add_subplot(len(station_indices), 1, 1)]
         axes.extend(
-            figure.add_subplot(
-                len(station_indices),
-                1,
-                row,
-                sharex=axes[0],
-            )
+            figure.add_subplot(len(station_indices), 1, row, sharex=axes[0])
             for row in range(2, len(station_indices) + 1)
         )
 
@@ -5721,92 +6526,53 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         for axis, station_index in zip(axes, station_indices):
             code = str(self.data.station_codes[int(station_index)])
             record: dict[str, Any] = {
-                "axis": axis,
-                "code": code,
-                "station_index": int(station_index),
+                "axis": axis, "code": code, "station_index": int(station_index),
                 "success": False,
             }
             try:
-                times, wave_power, labels, coordinate_name, band_note = (
-                    self._station_ulf_power_series(station_index, start, end)
-                )
-                axis.plot(times, wave_power, linewidth=1.0, label=code)
-                axis.set_xlim(times[0], times[-1])
-                record.update(
-                    {
-                        "success": True,
-                        "times": times,
-                        "wave_power": wave_power,
-                        "coordinate_name": coordinate_name,
-                        "labels": labels,
-                        "band_note": band_note,
-                    }
-                )
+                products = self._station_ulf_products(station_index, start, end)
+                record.update({"success": True, "products": products})
+                times = np.asarray(products["times"])
                 available_starts.append(self._datetime64_to_datetime(times[0]))
                 available_ends.append(self._datetime64_to_datetime(times[-1]))
                 successful += 1
             except Exception as exc:
                 record["error"] = str(exc)
-                axis.text(
-                    0.5,
-                    0.5,
-                    str(exc),
-                    transform=axis.transAxes,
-                    ha="center",
-                    va="center",
-                    wrap=True,
-                )
-            axis.set_ylabel(f"{code}\nULF power\n(nT²)")
-            axis.grid(True, alpha=0.3)
-            if axis is not axes[-1]:
-                axis.tick_params(labelbottom=False)
             axis_records.append(record)
-
-        axes[-1].set_xlabel("UTC (HH:MM)")
-        self._configure_time_axis(axes[-1])
-        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
-        used_bands = list(dict.fromkeys(
-            str(record["band_note"])
-            for record in axis_records if record.get("success")
-        ))
-        band_display = "; ".join(used_bands) if used_bands else "no resolvable band"
 
         available_start = min(available_starts) if available_starts else start
         available_end = max(available_ends) if available_ends else end
         displayed_interval = {"start": start, "end": end}
 
-        def update_title() -> None:
-            figure.suptitle(
-                f"Multi-station running horizontal ULF wave power "
-                f"({band_display})\n"
-                f"{self._format_gui_time(displayed_interval['start'])} to "
-                f"{self._format_gui_time(displayed_interval['end'])} UTC",
-                fontsize=13,
-            )
-
-        update_title()
-        figure.tight_layout(rect=(0, 0, 1, 0.95))
-        station_codes = "_".join(
-            str(self.data.station_codes[index]) for index in station_indices[:6]
-        )
-
         window = viewer.tk.Toplevel(self.root)
         window.title(
-            f"Multi-station ULF wave power — "
-            f"{successful}/{len(station_indices)} stations"
+            f"Multi-station ULF wave power — {successful}/{len(station_indices)} stations"
         )
-        window.geometry("1500x950")
-        window.minsize(1050, 650)
+        window.geometry("1550x980")
+        window.minsize(1080, 680)
         self._plot_windows.append(window)
+
+        broad_var = viewer.tk.BooleanVar(
+            value=initial_method == self.ULF_METHOD_BROADBAND
+        )
+        morlet_total_var = viewer.tk.BooleanVar(
+            value=initial_method == self.ULF_METHOD_MORLET
+        )
+        log_y_state = {"enabled": initial_method == self.ULF_METHOD_MORLET}
+        pc_vars = {
+            name: viewer.tk.BooleanVar(value=False) for name, _, _ in self.PC_BANDS
+        }
 
         action_row = viewer.ttk.Frame(window, padding=5)
         action_row.pack(fill=viewer.tk.X)
+        station_codes = "_".join(
+            str(self.data.station_codes[index]) for index in station_indices[:6]
+        )
         viewer.ttk.Button(
             action_row,
             text="Save figure PNG…",
             command=lambda: self.save_figure_png(
-                figure,
-                f"{times[1]}_multi_station_ulf_power_{station_codes}.png",
+                figure, f"multi_station_ulf_power_{station_codes}.png"
             ),
         ).pack(side=viewer.tk.RIGHT)
 
@@ -5818,36 +6584,22 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 f"{self._format_gui_time(available_end)} UTC"
             )
         )
-
         time_controls = viewer.ttk.LabelFrame(
             window, text="Displayed time range (UTC)", padding=5
         )
         time_controls.pack(fill=viewer.tk.X, padx=5, pady=(0, 5))
-        viewer.ttk.Label(time_controls, text="Start").grid(
-            row=0, column=0, sticky="w"
-        )
-        start_entry = viewer.ttk.Entry(
-            time_controls, textvariable=time_start_var, width=21
-        )
+        viewer.ttk.Label(time_controls, text="Start").grid(row=0, column=0, sticky="w")
+        start_entry = viewer.ttk.Entry(time_controls, textvariable=time_start_var, width=21)
         start_entry.grid(row=0, column=1, sticky="w", padx=(4, 10))
-        viewer.ttk.Label(time_controls, text="End").grid(
-            row=0, column=2, sticky="w"
-        )
-        end_entry = viewer.ttk.Entry(
-            time_controls, textvariable=time_end_var, width=21
-        )
+        viewer.ttk.Label(time_controls, text="End").grid(row=0, column=2, sticky="w")
+        end_entry = viewer.ttk.Entry(time_controls, textvariable=time_end_var, width=21)
         end_entry.grid(row=0, column=3, sticky="w", padx=(4, 10))
 
         body = viewer.ttk.Frame(window)
         body.pack(fill=viewer.tk.BOTH, expand=True)
-
         y_outer = viewer.ttk.LabelFrame(body, text="Y-axis controls", padding=4)
         y_outer.pack(side=viewer.tk.LEFT, fill=viewer.tk.Y, padx=(5, 2), pady=(0, 5))
-        y_canvas = viewer.tk.Canvas(
-            y_outer,
-            width=330,
-            highlightthickness=0,
-        )
+        y_canvas = viewer.tk.Canvas(y_outer, width=355, highlightthickness=0)
         y_scrollbar = viewer.ttk.Scrollbar(
             y_outer, orient=viewer.tk.VERTICAL, command=y_canvas.yview
         )
@@ -5856,44 +6608,146 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         y_canvas.pack(side=viewer.tk.LEFT, fill=viewer.tk.BOTH, expand=True)
         y_inner = viewer.ttk.Frame(y_canvas)
         y_window_id = y_canvas.create_window((0, 0), window=y_inner, anchor="nw")
-
-        def update_y_scrollregion(_event=None) -> None:
-            y_canvas.configure(scrollregion=y_canvas.bbox("all"))
-
-        def resize_y_inner(event) -> None:
-            y_canvas.itemconfigure(y_window_id, width=event.width)
-
-        y_inner.bind("<Configure>", update_y_scrollregion)
-        y_canvas.bind("<Configure>", resize_y_inner)
+        y_inner.bind(
+            "<Configure>", lambda _event=None: y_canvas.configure(scrollregion=y_canvas.bbox("all"))
+        )
+        y_canvas.bind(
+            "<Configure>", lambda event: y_canvas.itemconfigure(y_window_id, width=event.width)
+        )
 
         canvas_container = viewer.ttk.Frame(body)
         canvas_container.pack(
-            side=viewer.tk.LEFT,
-            fill=viewer.tk.BOTH,
-            expand=True,
-            padx=(2, 5),
-            pady=(0, 5),
+            side=viewer.tk.LEFT, fill=viewer.tk.BOTH, expand=True,
+            padx=(2, 5), pady=(0, 5),
         )
         canvas = FigureCanvasTkAgg(figure, master=canvas_container)
-        canvas.draw()
         canvas.get_tk_widget().pack(fill=viewer.tk.BOTH, expand=True)
         toolbar = NavigationToolbar2Tk(canvas, canvas_container, pack_toolbar=False)
         toolbar.update()
         toolbar.pack(fill=viewer.tk.X)
 
-        def parsed_display_interval() -> tuple[datetime, datetime]:
-            new_start = self._parse_gui_datetime(
-                time_start_var.get(), "Displayed start"
+        y_limit_controls: list[dict[str, Any]] = []
+        log_button_holder: dict[str, Any] = {}
+
+        def update_title() -> None:
+            selected_names = []
+            if broad_var.get():
+                selected_names.append("Instantaneous 5–600 s broad-band")
+            if morlet_total_var.get():
+                selected_names.append("Morlet Pc2+Pc3+Pc4+Pc5")
+            selected_names.extend(
+                name for name, variable in pc_vars.items() if variable.get()
             )
+            method_title = "Multi-station ULF power: " + (
+                ", ".join(selected_names) if selected_names else "no series selected"
+            )
+            figure.suptitle(
+                f"{method_title}\n"
+                f"{self._format_gui_time(displayed_interval['start'])} to "
+                f"{self._format_gui_time(displayed_interval['end'])} UTC",
+                fontsize=13,
+            )
+
+        def update_y_control_values() -> None:
+            for control, record in zip(y_limit_controls, axis_records):
+                if not record.get("success"):
+                    continue
+                low, high = control["axis"].get_ylim()
+                control["low_var"].set(f"{low:.6g}")
+                control["high_var"].set(f"{high:.6g}")
+
+        def refresh_plots(auto_y: bool = True) -> None:
+            for row_index, record in enumerate(axis_records):
+                axis = record["axis"]
+                axis.clear()
+                code = record["code"]
+                if not record.get("success"):
+                    axis.text(
+                        0.5, 0.5, record.get("error", "ULF calculation failed"),
+                        transform=axis.transAxes, ha="center", va="center", wrap=True,
+                    )
+                    axis.set_ylabel(f"{code}\nULF power")
+                else:
+                    products = record["products"]
+                    times = np.asarray(products["times"])
+                    plotted = 0
+                    if broad_var.get():
+                        broad_series = np.asarray(
+                            products["broadband_power"], dtype=float
+                        )
+                        if log_y_state["enabled"]:
+                            broad_series = self._positive_log10(broad_series)
+                        axis.plot(
+                            times, broad_series, linewidth=1.0,
+                            label="Instantaneous 5–600 s broad-band power",
+                        )
+                        plotted += 1
+                    if morlet_total_var.get():
+                        total = np.asarray(products["morlet_total_power"], dtype=float)
+                        display_total = (
+                            self._positive_log10(total)
+                            if log_y_state["enabled"] else total
+                        )
+                        axis.plot(
+                            times, display_total, linewidth=1.05,
+                            label="Morlet Pc2+Pc3+Pc4+Pc5"
+                        )
+                        plotted += 1
+                    for name, _, _ in self.PC_BANDS:
+                        if not pc_vars[name].get():
+                            continue
+                        band_series = np.asarray(
+                            products["morlet_band_power"][name], dtype=float
+                        )
+                        if log_y_state["enabled"]:
+                            band_series = self._positive_log10(band_series)
+                        axis.plot(
+                            times, band_series, linewidth=0.9,
+                            label=f"Morlet {name}",
+                        )
+                        plotted += 1
+                    axis.set_ylabel(
+                        f"{code}\nULF power\n"
+                        + ("log10(nT²)" if log_y_state["enabled"] else "(nT²)")
+                    )
+                    if not plotted:
+                        axis.text(
+                            0.5, 0.5, "Select one or more power series",
+                            transform=axis.transAxes, ha="center", va="center",
+                        )
+                    axis.set_xlim(
+                        displayed_interval["start"], displayed_interval["end"]
+                    )
+                # "Log y" means the plotted ordinate is explicitly log10(power),
+                # matching the requested SuperMAG-style display rather than merely
+                # changing Matplotlib tick spacing.
+                axis.set_yscale("linear")
+                axis.grid(True, alpha=0.3)
+                if row_index != len(axes) - 1:
+                    axis.tick_params(labelbottom=False)
+                if auto_y and record.get("success"):
+                    axis.relim(visible_only=True)
+                    axis.autoscale(enable=True, axis="y", tight=False)
+
+            axes[-1].set_xlabel("UTC (HH:MM)")
+            self._configure_time_axis(axes[-1])
+            axes[-1].set_xlim(displayed_interval["start"], displayed_interval["end"])
+            update_title()
+            has_global_legend = self._shared_figure_legend(figure, axes)
+            figure.tight_layout(
+                rect=(0, 0, 1, 0.85 if has_global_legend else 0.95)
+            )
+            update_y_control_values()
+            self._attach_time_value_cursor(canvas, axes)
+            canvas.draw_idle()
+
+        def parsed_display_interval() -> tuple[datetime, datetime]:
+            new_start = self._parse_gui_datetime(time_start_var.get(), "Displayed start")
             new_end = self._parse_gui_datetime(time_end_var.get(), "Displayed end")
             if new_end <= new_start:
-                raise ValueError(
-                    "Displayed end time must be later than displayed start time."
-                )
+                raise ValueError("Displayed end time must be later than displayed start time.")
             if new_end < available_start or new_start > available_end:
-                raise ValueError(
-                    "The entered time range does not overlap the plotted ULF data."
-                )
+                raise ValueError("The entered time range does not overlap the plotted ULF data.")
             return new_start, new_end
 
         def apply_time_range(_event=None) -> None:
@@ -5906,13 +6760,11 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 return
             displayed_interval["start"] = new_start
             displayed_interval["end"] = new_end
-            axes[-1].set_xlim(new_start, new_end)
-            update_title()
             time_status_var.set(
                 f"Displayed: {self._format_gui_time(new_start)} to "
                 f"{self._format_gui_time(new_end)} UTC"
             )
-            canvas.draw_idle()
+            refresh_plots(auto_y=False)
 
         def reset_time_range() -> None:
             time_start_var.set(self._format_gui_time(start))
@@ -5922,13 +6774,12 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         viewer.ttk.Button(
             time_controls, text="Apply time range", command=apply_time_range
         ).grid(row=0, column=4, sticky="ew", padx=(0, 5))
-        viewer.ttk.Button(
-            time_controls, text="Reset", command=reset_time_range
-        ).grid(row=0, column=5, sticky="ew")
-        viewer.ttk.Label(
-            time_controls,
-            textvariable=time_status_var,
-        ).grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        viewer.ttk.Button(time_controls, text="Reset", command=reset_time_range).grid(
+            row=0, column=5, sticky="ew"
+        )
+        viewer.ttk.Label(time_controls, textvariable=time_status_var).grid(
+            row=1, column=0, columnspan=6, sticky="w", pady=(4, 0)
+        )
         start_entry.bind("<Return>", apply_time_range)
         end_entry.bind("<Return>", apply_time_range)
 
@@ -5944,17 +6795,100 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
                 list(station_indices), export_start, export_end
             )
 
+        def load_official_reference() -> None:
+            if self._load_official_supermag_ulf_reference_dialog(
+                window, list(station_indices)
+            ):
+                refresh_plots(auto_y=False)
+
+        def show_comparison_curves() -> None:
+            comparison = Figure(
+                figsize=(14, max(6.0, 2.4 * len(axis_records))), dpi=100
+            )
+            comp_axes = [comparison.add_subplot(len(axis_records), 1, 1)]
+            comp_axes.extend(
+                comparison.add_subplot(len(axis_records), 1, row, sharex=comp_axes[0])
+                for row in range(2, len(axis_records) + 1)
+            )
+            for row_index, (axis, record) in enumerate(zip(comp_axes, axis_records)):
+                code = record["code"]
+                if record.get("success"):
+                    products = record["products"]
+                    times = np.asarray(products["times"])
+                    axis.plot(
+                        times, self._positive_log10(products["broadband_power"]),
+                        label="Instantaneous 5–600 s broad-band",
+                    )
+                    axis.plot(
+                        times, self._positive_log10(products["butterworth_pc_sum_power"]),
+                        label="Separate Butterworth Pc2+Pc3+Pc4+Pc5",
+                    )
+                    axis.plot(
+                        times, self._positive_log10(products["morlet_total_power"]),
+                        label="Morlet Pc2+Pc3+Pc4+Pc5",
+                    )
+                    reference = self._official_supermag_reference_for_station(code)
+                    if reference is not None:
+                        official_times = np.asarray(reference["times"])
+                        mask = (
+                            (official_times >= np.datetime64(displayed_interval["start"], "ns"))
+                            & (official_times <= np.datetime64(displayed_interval["end"], "ns"))
+                        )
+                        axis.plot(
+                            official_times[mask],
+                            np.asarray(reference["total_log10"])[mask],
+                            label="Official SuperMAG Pc2+Pc3+Pc4+Pc5",
+                        )
+                    else:
+                        axis.text(
+                            0.99, 0.95, "Official reference not loaded",
+                            transform=axis.transAxes, ha="right", va="top", fontsize=8,
+                        )
+                    axis.set_yscale("linear")
+                    axis.set_xlim(displayed_interval["start"], displayed_interval["end"])
+                    axis.legend(loc="upper right", fontsize=7, ncol=2)
+                else:
+                    axis.text(
+                        0.5, 0.5, record.get("error", "ULF calculation failed"),
+                        transform=axis.transAxes, ha="center", va="center", wrap=True,
+                    )
+                axis.set_ylabel(f"{code}\nlog10 power\n(nT²)")
+                axis.grid(True, alpha=0.3)
+                if row_index != len(comp_axes) - 1:
+                    axis.tick_params(labelbottom=False)
+            comp_axes[-1].set_xlabel("UTC (HH:MM)")
+            self._configure_time_axis(comp_axes[-1])
+            comparison.suptitle(
+                "ULF method comparison: Instantaneous broad-band, separate Butterworth Pc bands, \n"
+                "Morlet Pc bands, and official SuperMAG reference (if imported)",
+                fontsize=12,
+            )
+            has_global_legend = self._shared_figure_legend(
+                comparison, comp_axes, fontsize=8
+            )
+            comparison.tight_layout(
+                rect=(0, 0, 1, 0.85 if has_global_legend else 0.95)
+            )
+            self._new_figure_window(
+                "ULF method comparison",
+                comparison,
+                "ulf_method_comparison.png",
+                geometry="1500x950",
+                cursor_axes=comp_axes,
+            )
+
         viewer.ttk.Button(
-            action_row,
-            text="Export displayed-range data…",
-            command=export_current_range,
+            action_row, text="Export displayed-range data…", command=export_current_range
+        ).pack(side=viewer.tk.RIGHT, padx=(0, 5))
+        viewer.ttk.Button(
+            action_row, text="Show four-method comparison", command=show_comparison_curves
+        ).pack(side=viewer.tk.RIGHT, padx=(0, 5))
+        viewer.ttk.Button(
+            action_row, text="Load official SuperMAG ULF NetCDF…", command=load_official_reference
         ).pack(side=viewer.tk.RIGHT, padx=(0, 5))
         viewer.ttk.Label(
             action_row,
-            text=(
-                "Set the x-axis above; use the station controls at left for "
-                "independent y-axis limits."
-            ),
+            text="Local calculations use one hour of context on each side when available.",
         ).pack(side=viewer.tk.LEFT)
 
         viewer.ttk.Label(y_inner, text="Station").grid(
@@ -5966,8 +6900,6 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         viewer.ttk.Label(y_inner, text="Y max").grid(
             row=0, column=2, sticky="w", padx=2
         )
-
-        y_limit_controls: list[dict[str, Any]] = []
 
         def apply_y_limits(control: dict[str, Any], _event=None) -> None:
             axis = control["axis"]
@@ -5994,8 +6926,6 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
 
         def auto_y_limits(control: dict[str, Any]) -> None:
             axis = control["axis"]
-            # set_ylim() disables Matplotlib's y autoscaling. Re-enable it
-            # explicitly so Auto continues to work after manual limits.
             axis.set_autoscaley_on(True)
             axis.relim(visible_only=True)
             axis.autoscale(enable=True, axis="y", tight=False)
@@ -6006,38 +6936,26 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
 
         for row, record in enumerate(axis_records, start=1):
             axis = record["axis"]
-            code = record["code"]
-            low, high = axis.get_ylim()
-            low_var = viewer.tk.StringVar(value=f"{low:.6g}")
-            high_var = viewer.tk.StringVar(value=f"{high:.6g}")
+            low_var = viewer.tk.StringVar(value="")
+            high_var = viewer.tk.StringVar(value="")
             control = {
-                "axis": axis,
-                "code": code,
-                "low_var": low_var,
-                "high_var": high_var,
+                "axis": axis, "code": record["code"],
+                "low_var": low_var, "high_var": high_var,
             }
             y_limit_controls.append(control)
-            viewer.ttk.Label(y_inner, text=code).grid(
+            viewer.ttk.Label(y_inner, text=record["code"]).grid(
                 row=row, column=0, sticky="w", padx=(2, 4), pady=2
             )
-            low_entry = viewer.ttk.Entry(
-                y_inner, textvariable=low_var, width=10
-            )
+            low_entry = viewer.ttk.Entry(y_inner, textvariable=low_var, width=10)
             low_entry.grid(row=row, column=1, sticky="ew", padx=2, pady=2)
-            high_entry = viewer.ttk.Entry(
-                y_inner, textvariable=high_var, width=10
-            )
+            high_entry = viewer.ttk.Entry(y_inner, textvariable=high_var, width=10)
             high_entry.grid(row=row, column=2, sticky="ew", padx=2, pady=2)
             apply_button = viewer.ttk.Button(
-                y_inner,
-                text="Apply",
-                command=lambda item=control: apply_y_limits(item),
+                y_inner, text="Apply", command=lambda item=control: apply_y_limits(item)
             )
             apply_button.grid(row=row, column=3, sticky="ew", padx=2, pady=2)
             auto_button = viewer.ttk.Button(
-                y_inner,
-                text="Auto",
-                command=lambda item=control: auto_y_limits(item),
+                y_inner, text="Auto", command=lambda item=control: auto_y_limits(item)
             )
             auto_button.grid(row=row, column=4, sticky="ew", padx=(2, 4), pady=2)
             low_entry.bind(
@@ -6046,38 +6964,91 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             high_entry.bind(
                 "<Return>", lambda event, item=control: apply_y_limits(item, event)
             )
-            if not record["success"]:
-                low_entry.configure(state="disabled")
-                high_entry.configure(state="disabled")
-                apply_button.configure(state="disabled")
-                auto_button.configure(state="disabled")
+            if not record.get("success"):
+                for widget in (low_entry, high_entry, apply_button, auto_button):
+                    widget.configure(state="disabled")
 
         def auto_all_y_limits() -> None:
             for control, record in zip(y_limit_controls, axis_records):
-                if record["success"]:
+                if record.get("success"):
                     auto_y_limits(control)
 
+        separator_row = len(axis_records) + 1
         viewer.ttk.Separator(y_inner, orient=viewer.tk.HORIZONTAL).grid(
-            row=len(axis_records) + 1,
-            column=0,
-            columnspan=5,
-            sticky="ew",
-            pady=(6, 4),
+            row=separator_row, column=0, columnspan=5, sticky="ew", pady=(6, 4)
         )
         viewer.ttk.Button(
             y_inner, text="Auto-scale all Y axes", command=auto_all_y_limits
         ).grid(
-            row=len(axis_records) + 2,
-            column=0,
-            columnspan=5,
-            sticky="ew",
-            padx=2,
-            pady=(0, 4),
+            row=separator_row + 1, column=0, columnspan=5,
+            sticky="ew", padx=2, pady=(0, 4),
         )
+
+        def update_log_button_text() -> None:
+            button = log_button_holder.get("button")
+            if button is not None:
+                button.configure(
+                    text=(
+                        "Switch to linear y-axes"
+                        if log_y_state["enabled"] else "Switch to log y-axes"
+                    )
+                )
+
+        def toggle_log_y_axes() -> None:
+            log_y_state["enabled"] = not log_y_state["enabled"]
+            update_log_button_text()
+            refresh_plots(auto_y=True)
+
+        log_button = viewer.ttk.Button(
+            y_inner, text="Switch to log y-axes", command=toggle_log_y_axes
+        )
+        log_button.grid(
+            row=separator_row + 2, column=0, columnspan=5,
+            sticky="ew", padx=2, pady=(0, 6),
+        )
+        log_button_holder["button"] = log_button
+        update_log_button_text()
+
+        method_frame = viewer.ttk.LabelFrame(
+            y_inner, text="Power shown in all subplots", padding=4
+        )
+        method_frame.grid(
+            row=separator_row + 3, column=0, columnspan=5,
+            sticky="ew", padx=2, pady=(0, 6),
+        )
+
+        def series_changed() -> None:
+            refresh_plots(auto_y=True)
+
+        viewer.ttk.Checkbutton(
+            method_frame,
+            text="Instantaneous 5–600 s broad-band power",
+            variable=broad_var,
+            command=series_changed,
+        ).pack(anchor="w")
+        viewer.ttk.Checkbutton(
+            method_frame,
+            text="Morlet-integrated Pc2 + Pc3 + Pc4 + Pc5",
+            variable=morlet_total_var,
+            command=series_changed,
+        ).pack(anchor="w")
+
+        band_frame = viewer.ttk.Frame(method_frame, padding=(16, 2, 0, 0))
+        band_frame.pack(fill=viewer.tk.X)
+        viewer.ttk.Label(band_frame, text="Also show individual Morlet bands:").pack(anchor="w")
+        for name, _, _ in self.PC_BANDS:
+            widget = viewer.ttk.Checkbutton(
+                band_frame,
+                text=name,
+                variable=pc_vars[name],
+                command=series_changed,
+            )
+            widget.pack(side=viewer.tk.LEFT, padx=(0, 8))
         for column in (1, 2):
             y_inner.columnconfigure(column, weight=1)
 
-        self._attach_time_value_cursor(canvas, axes)
+        refresh_plots(auto_y=True)
+        canvas.draw()
 
         def close_window() -> None:
             try:
@@ -6093,15 +7064,17 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
         station_index: int,
         start: datetime,
         end: datetime,
+        initial_method: str = ULF_METHOD_BROADBAND,
     ) -> None:
+        """Open a station-level ULF method-comparison figure."""
         if self.data is None:
             return
         code = str(self.data.station_codes[int(station_index)])
-        minimum_period, maximum_period = self.TOTAL_ULF_PERIOD_RANGE
         try:
-            times, wave_power, labels, coordinate_name, band_note = self._station_ulf_power_series(
-                station_index, start, end
-            )
+            products = self._station_ulf_products(station_index, start, end)
+            times = np.asarray(products["times"])
+            labels = tuple(products["labels"])
+            coordinate_name = str(products["coordinate_name"])
             _, values, cadence, _, _ = self._prepare_station_timeseries(
                 station_index, start, end
             )
@@ -6121,45 +7094,85 @@ raise SystemExit(module.gmag_downloader.main(sys.argv[2:]))
             )
             return
 
-        figure = Figure(figsize=(14, 9), dpi=100)
-        power_axis = figure.add_subplot(2, 1, 1)
-        scale_axis = figure.add_subplot(2, 1, 2, sharex=power_axis)
-        power_axis.plot(times, wave_power, linewidth=1.0, label="ULF power")
-        power_axis.set_ylabel("ULF power (nT²)")
-        power_axis.set_title(
-            f"{code} running horizontal {band_note} wave power "
+        figure = Figure(figsize=(14, 11), dpi=100)
+        band_axis = figure.add_subplot(3, 1, 1)
+        morlet_axis = figure.add_subplot(3, 1, 2, sharex=band_axis)
+        scale_axis = figure.add_subplot(3, 1, 3, sharex=band_axis)
+
+        band_axis.plot(
+            times, products["broadband_power"], linewidth=1.0,
+            label="Instantaneous 5–600 s broad-band power",
+        )
+        band_axis.plot(
+            times, products["butterworth_pc_sum_power"], linewidth=0.9,
+            label="Separate Butterworth Pc2² + Pc3² + Pc4² + Pc5²",
+        )
+        band_axis.set_ylabel("Power (nT²)")
+        band_axis.set_title(
+            f"{code} bandpass-method comparison "
             f"({coordinate_name} {labels[0]}/{labels[1]})"
         )
-        power_axis.grid(True, alpha=0.3)
-        power_axis.tick_params(labelbottom=False)
+        band_axis.grid(True, alpha=0.3)
+        band_axis.legend(loc="upper right", fontsize=8)
+        band_axis.tick_params(labelbottom=False)
+
+        morlet_axis.plot(
+            times, self._positive_log10(products["morlet_total_power"]),
+            linewidth=1.1, label="Morlet Pc2+Pc3+Pc4+Pc5",
+        )
+        for name, _, _ in self.PC_BANDS:
+            morlet_axis.plot(
+                times, self._positive_log10(products["morlet_band_power"][name]),
+                linewidth=0.8, label=name,
+            )
+        reference = self._official_supermag_reference_for_station(code)
+        if reference is not None:
+            official_times = np.asarray(reference["times"])
+            mask = (
+                (official_times >= np.datetime64(start, "ns"))
+                & (official_times <= np.datetime64(end, "ns"))
+            )
+            morlet_axis.plot(
+                official_times[mask], np.asarray(reference["total_log10"])[mask],
+                linewidth=1.1, linestyle="--",
+                label="Official SuperMAG Pc2+Pc3+Pc4+Pc5",
+            )
+        morlet_axis.set_yscale("linear")
+        morlet_axis.set_ylabel("log10 power (nT²)")
+        morlet_axis.set_title(
+            "Pc bands for ULF as in SuperMAG "
+            + (" + official reference" if reference is not None else "")
+        )
+        morlet_axis.grid(True, alpha=0.3)
+        morlet_axis.legend(loc="upper right", fontsize=7, ncol=3)
+        morlet_axis.tick_params(labelbottom=False)
 
         mesh = self._draw_scalogram(
             scale_axis, times, periods, scalogram_power, values[:, :2], cadence
         )
-        self._configure_scalogram_axis(scale_axis, visible_max_s=200.0)
+        self._configure_scalogram_axis(scale_axis, visible_max_s=600.0)
         scale_axis.set_xlabel("UTC (HH:MM)")
         scale_axis.set_title("Station horizontal wavelet scalogram")
         scale_axis.grid(True, alpha=0.18)
         scale_axis.set_xlim(times[0], times[-1])
         self._configure_time_axis(scale_axis)
         figure.colorbar(
-            mesh,
-            ax=scale_axis,
-            pad=0.015,
+            mesh, ax=scale_axis, pad=0.015,
             label="Horizontal relative wavelet power (dB)",
         )
         figure.suptitle(
-            f"{code} total ULF wave-power detail\n"
-            f"{self._format_gui_time(start)} to {self._format_gui_time(end)} UTC",
+            f"{code} ULF power comparison\n"
+            f"{self._format_gui_time(start)} to {self._format_gui_time(end)} UTC\n"
+            f"{products['padding_note']}",
             fontsize=13,
         )
-        figure.tight_layout(rect=(0, 0, 1, 0.95))
+        figure.tight_layout(rect=(0, 0, 1, 0.93))
         self._new_figure_window(
-            f"Total ULF wave power — {code}",
+            f"ULF power comparison — {code}",
             figure,
-            f"{code}_total_ulf_wave_power.png",
-            geometry="1450x900",
-            cursor_axes=[power_axis, scale_axis],
+            f"{code}_ulf_power_comparison.png",
+            geometry="1450x980",
+            cursor_axes=[band_axis, morlet_axis, scale_axis],
             scalogram_cursor_data={scale_axis: (times, periods, scalogram_power)},
         )
 
